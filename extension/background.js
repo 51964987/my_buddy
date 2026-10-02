@@ -161,12 +161,16 @@ async function clipCurrentTab(info) {
   };
 
   const { server, token } = await getConfig();
-  const selectionNote = payload.text ? `（选中文本 ${payload.text.length} 字）` : "（未检测到选中文本）";
   try {
     const result = await post(server, token, payload);
     badge("OK", "#16a34a");
     if (result && result.entry_id) await track(result.entry_id, payload.title, payload.url);
-    await notify("已存入 kb", (payload.title || payload.url || "") + selectionNote);
+    if (payload.text) {
+      await notify("已存入 kb", `${payload.title || payload.url}（选中文本 ${payload.text.length} 字）`);
+    } else {
+      // 未选中不算错：普通网页会抓取全文；但 SPA 页需要选中兜底，受理时给出引导
+      await notify("已存入 kb（未选中文本）", "普通网页将自动抓取全文；SPA/JS 渲染页建议先选中一段文字再剪藏");
+    }
     flushQueue();
   } catch (e) {
     await enqueue(payload);
