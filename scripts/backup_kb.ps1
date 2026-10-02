@@ -1,4 +1,4 @@
-# kb/ 文件级备份脚本（方案文档 §6：kb/ 为唯一事实源，纳入文件级备份；index.db 可重建不备份）
+﻿# kb/ 文件级备份脚本（方案文档 §6：kb/ 为唯一事实源，纳入文件级备份；index.db 可重建不备份）
 #
 # 用法（PowerShell）：
 #   .\scripts\backup_kb.ps1 -Dest D:\backups\kb              # 增量备份（不删除目标端多余文件）

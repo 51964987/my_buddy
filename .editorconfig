@@ -1,0 +1,9 @@
+# 本项目 Windows PowerShell 脚本必须带 BOM：
+# Windows PowerShell 5.1 对无 BOM 的 .ps1 按 ANSI（中文系统即 GBK）解析，
+# UTF-8 中文会乱码甚至改变字符串字面量内容。带 BOM 则 5.1/7+ 均正确解析。
+root = true
+
+[*.{ps1,psm1,psd1}]
+charset = utf-8-bom
+end_of_line = crlf
+insert_final_newline = true
