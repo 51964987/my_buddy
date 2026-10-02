@@ -15,17 +15,41 @@
 ```
 my_buddy/
 ├── docs/
-│   ├── 方案文档.md          # 设计唯一事实源（v0.10，含修订记录）
+│   ├── 方案文档.md          # 设计唯一事实源（v0.11，含修订记录）
 │   └── ui-mockups/          # UI 方案示意图（5 页 + 折叠态，评审用）
+├── kbserver/                # 常驻服务（P0 已落地）
+│   ├── app.py               # API 网关（Capture / Query·运维 / 参数设置）
+│   ├── capture.py           # 受理 + inbox 队列
+│   ├── normalize.py         # 归一化引擎（trafilatura + markdownify）
+│   ├── orchestrator.py      # 管道编排器（状态机 + 重试 + error/重跑）
+│   ├── guard.py             # 写边界守卫（区域白名单 + 原子写）
+│   ├── idgen.py             # ID/去重引擎（URL 规范化 + SHA-1）
+│   ├── config.py            # 配置中心（掩码 + 原子写）
+│   ├── cli.py               # 命令行投递入口
+│   └── __main__.py          # python -m kbserver
+├── tests/                   # pytest（27 用例，覆盖 P0 判据）
 ├── .codebuddy/rules/        # AI 协作规则（核心铁律/技术栈/工作流/设计索引/UI 约束）
 ├── AGENTS.md                # 跨 AI 工具入口指引
-└── kb/                      # 知识库数据目录（P0 起由服务创建）
+└── kb/                      # 知识库数据目录（服务启动时创建）
     ├── inbox/               # 捕获暂存
     ├── sources/             # 单条沉淀（A/B/C 类）
-    ├── collections/         # 文档站集合（D 类）
-    ├── wiki/                # AI 整理产物（隔离区）
-    └── index.db             # 全文/向量索引（可重建）
+    ├── collections/         # 文档站集合（D 类，P2）
+    ├── wiki/                # AI 整理产物（隔离区，P3）
+    └── index.db             # 全文/向量索引（可重建，P4）
 ```
+
+## 快速开始（P0）
+
+```powershell
+pip install -r requirements.txt
+python -m kbserver                     # 启动服务（默认 127.0.0.1:8765）
+python -m kbserver.cli submit <url>    # 命令行投递
+python -m kbserver.cli status          # 查看管道状态
+python -m pytest                       # 运行测试
+```
+
+配置文件 `kbserver.config.json`（首次运行后可手工创建/经 API 修改）：`kb_root` / `host` / `port` / `token`（设置后所有 API 需带 `X-KB-Token` 头）。
+
 
 ## 技术栈
 
@@ -37,7 +61,7 @@ Python 3.12 · FastAPI · uvicorn · SQLite（FTS5 + sqlite-vec）· trafilatura
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| P0 | schema 定稿 + 服务骨架（capture API + 归一化落盘） | 未开始 |
+| P0 | schema 定稿 + 服务骨架（capture API + 归一化落盘） | 已完成 |
 | P1 | 浏览器扩展 + 手机投递 + 局域网监听 | 未开始 |
 | P2a/b/c | 飞书 API / 论坛抓取 / 文档站集合同步 adapter | 未开始 |
 | P3 | AI 整理流水线（分级模型，重试与断点） | 未开始 |
@@ -47,6 +71,7 @@ Python 3.12 · FastAPI · uvicorn · SQLite（FTS5 + sqlite-vec）· trafilatura
 ## 查阅指引
 
 - 设计细节（需求/架构/schema/管道/部署/风险/技术决策/角色/模块）：`docs/方案文档.md`，章节索引见 `.codebuddy/rules/03-design-reference/RULE.mdc`
+- 操作与验收（启动/投递/去重/error 重跑/token）：`docs/操作手册.md`
 - AI 编码助手：先读 `AGENTS.md` 与 `.codebuddy/rules/`，设计变更须回写方案文档并追加修订记录
 
 ## AI 协作规则索引
