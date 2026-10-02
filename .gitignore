@@ -4,3 +4,4 @@ __pycache__/
 kb/
 kbserver.config.json
 kb_service*.log
+.tmp*.py
