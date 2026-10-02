@@ -148,3 +148,53 @@ def test_absolutize_links():
     assert "[rel](https://site.com/base/docs/page.md)" in out
     assert "[abs](https://other.com/a)" in out
     assert "[anchor](#sec)" in out
+
+
+SPA_HTML = "<html><head><title>spa page</title></head><body></body></html>"
+
+
+def test_extract_fallback_to_selection(cfg, guard):
+    orch = Orchestrator(cfg, guard, fetcher=make_fetcher(pages={"https://example.com/spa": SPA_HTML}))
+    r = _capture(guard, "https://example.com/spa", text="selected key content")
+    orch.scan_once()
+
+    entry_dir = guard.kb_root.joinpath(*f"sources/web/2026/{r['entry_id']}".split("/"))
+    note = (entry_dir / "note.md").read_text("utf-8")
+    assert "selected key content" in note
+    meta = json.loads((entry_dir / "meta.json").read_text("utf-8"))
+    assert meta["extraction"] == "selection_fallback"
+    assert meta["raw_files"] == ["raw/page.html"]  # SPA 空壳仍保留
+
+
+def test_extract_error_without_selection(cfg, guard):
+    orch = Orchestrator(cfg, guard, fetcher=make_fetcher(pages={"https://example.com/spa2": SPA_HTML}))
+    r = _capture(guard, "https://example.com/spa2")
+    for _ in range(3):
+        orch.scan_once()
+    data = _capture_json(guard, r["entry_id"])
+    assert data["status"] == "error"
+    assert data["error_stage"] == "extract"
+
+
+def test_fetch_fail_fallback_then_full_recover(cfg, guard):
+    fail = {"https://example.com/down"}
+    pages = {}
+    orch = Orchestrator(cfg, guard, fetcher=make_fetcher(pages=pages, fail_urls=fail))
+    r = _capture(guard, "https://example.com/down", text="captured while offline")
+    orch.scan_once()
+
+    entry_dir = guard.kb_root.joinpath(*f"sources/web/2026/{r['entry_id']}".split("/"))
+    assert "captured while offline" in (entry_dir / "note.md").read_text("utf-8")
+    meta = json.loads((entry_dir / "meta.json").read_text("utf-8"))
+    assert meta["extraction"] == "selection_fallback"
+    assert meta["raw_files"] == []
+
+    fail.clear()
+    pages["https://example.com/down"] = SAMPLE_HTML
+    _capture(guard, "https://example.com/down")
+    orch.scan_once()
+
+    meta = json.loads((entry_dir / "meta.json").read_text("utf-8"))
+    assert meta["extraction"] == "full"
+    assert meta["raw_files"] == ["raw/page.html"]
+    assert "first paragraph" in (entry_dir / "note.md").read_text("utf-8")

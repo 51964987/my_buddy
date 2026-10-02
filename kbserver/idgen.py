@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 TRACKING_KEY_PREFIXES = ("utm_", "share_")
-TRACKING_KEYS = {"spm", "vd_source", "vd_extension", "fr", "ref", "refer"}
+TRACKING_KEYS = {"spm", "vd_source", "vd_extension", "fr", "ref", "refer", "_vtm_"}
 
 ID_LENGTH = 12
 

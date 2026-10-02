@@ -180,28 +180,42 @@ def normalize_entry(inbox_dir: Path, guard: Guard, cfg: dict, fetcher: FetchFn) 
     fr: FetchResult | None = None
     raw_files: list[str] = []
     html_bytes: bytes | None = None
+    selection = (payload.get("text") or payload.get("selected_text") or "").strip()
+    extraction = "full"
 
     if url:
         try:
             fr = fetcher(url)
         except Exception as exc:
-            raise NormalizeError("fetch", f"{type(exc).__name__}: {exc}") from exc
-        canonical = canonicalize_url(fr.final_url)
+            if not selection:
+                raise NormalizeError("fetch", f"{type(exc).__name__}: {exc}") from exc
+        if fr is not None:
+            canonical = canonicalize_url(fr.final_url)
+            html = fr.text
+            try:
+                markdown = extract_markdown(html)
+            except NormalizeError:
+                if not selection:
+                    raise
+                markdown = selection
+                extraction = "selection_fallback"
+            title = (payload.get("title") or "").strip() or extract_title(html)
+            html_bytes = fr.content
+        else:
+            canonical = canonicalize_url(url)
+            markdown = selection
+            extraction = "selection_fallback"
+            title = (payload.get("title") or "").strip()
         entry_id = url_to_id(canonical)
         platform, source_type = detect_platform(canonical)
-        html = fr.text
-        markdown = extract_markdown(html)
-        title = (payload.get("title") or "").strip() or extract_title(html)
-        html_bytes = fr.content
     else:
-        text = (payload.get("text") or payload.get("selected_text") or "").strip()
-        if not text:
+        if not selection:
             raise NormalizeError("extract", "payload has neither url nor text")
         canonical = ""
         entry_id = inbox_dir.name
         platform, source_type = "web", "social"
-        markdown = text
-        title = (payload.get("title") or "").strip() or text.splitlines()[0][:80]
+        markdown = selection
+        title = (payload.get("title") or "").strip() or selection.splitlines()[0][:80]
 
     content_hash = hashlib.sha1(markdown.encode("utf-8")).hexdigest()
     entry_rel = f"sources/{platform}/{captured_at[:4]}/{entry_id}"
@@ -253,7 +267,7 @@ def normalize_entry(inbox_dir: Path, guard: Guard, cfg: dict, fetcher: FetchFn) 
         except Exception:
             pass
 
-    if url:
+    if url and fr is not None:
         markdown = _absolutize_links(markdown, fr.final_url)
         if ncfg.get("image_localization", True):
             markdown = _localize_images(
@@ -288,6 +302,7 @@ def normalize_entry(inbox_dir: Path, guard: Guard, cfg: dict, fetcher: FetchFn) 
             else None
         ),
         "captured_from": capture.get("entry"),
+        "extraction": extraction,
     }
 
     guard.write_text("normalize", f"{entry_rel}/note.md", note_md)

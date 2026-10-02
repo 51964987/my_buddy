@@ -3,9 +3,12 @@
   "name": "kb buddy clipper",
   "version": "0.1.0",
   "description": "剪藏当前页到 kbserver（URL + 标题 + 选中文本 + 截图；离线暂存自动重发）",
+  "icons": { "16": "icon16.png", "48": "icon48.png", "128": "icon128.png" },
   "permissions": ["activeTab", "contextMenus", "storage", "alarms", "scripting"],
+  "optional_permissions": ["notifications"],
   "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
   "background": { "service_worker": "background.js" },
+  "action": {},
   "options_page": "options.html",
   "commands": {
     "clip-page": {

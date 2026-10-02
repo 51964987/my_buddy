@@ -31,6 +31,14 @@ def test_share_tracking_keys():
     )
 
 
+def test_vtm_fingerprint_param_stripped():
+    # docs.volcengine.com 的 _vtm_ 每次访问变化，若不清洗则同页每次剪藏都会生成新 id
+    a = canonicalize_url("https://docs.example.com/p?_vtm_=a.b.13&lang=zh")
+    b = canonicalize_url("https://docs.example.com/p?_vtm_=a.b.15&lang=zh")
+    assert a == b == "https://docs.example.com/p?lang=zh"
+    assert url_to_id("https://docs.example.com/p?_vtm_=x") == url_to_id("https://docs.example.com/p")
+
+
 def test_text_entry_id():
     eid = text_entry_id()
     assert eid.startswith("t")
