@@ -1,0 +1,27 @@
+---
+description: 技术栈选型与禁用清单（Python/FastAPI/SQLite），写代码前必读
+alwaysApply: true
+enabled: true
+updatedAt: 2026-10-02T02:00:00.000Z
+---
+
+# 技术栈约定
+
+依据 `docs/方案文档.md` 第 9 节（已拍板，变更需走决策修订流程）。
+
+## 必须使用
+
+- Python 3.12 + FastAPI + uvicorn；服务入口 `python -m kbserver`。
+- SQLite（标准库 `sqlite3`）承担全文索引（FTS5）与程序索引。
+- 正文提取用 trafilatura；动态页兜底用 Playwright；Markdown 转换用 markdownify。
+- LLM 调用统一走 OpenAI 兼容协议（`base_url + api_key + model`），按任务分级配置模型。
+
+## 禁止引入
+
+- 消息队列（inbox 目录即队列）、Elasticsearch/Milvus/Qdrant 等独立索引服务（FTS5 + sqlite-vec 起步）、ORM 框架（schema 即文件系统 + 轻量 SQL）。
+- 任何把数据写死到单一厂商 SDK 的调用方式（换模型后端必须只改配置）。
+
+## 平台约束
+
+- 目标运行环境 Windows：路径字面量一律 ASCII；注意 MAX_PATH（D 类章节路径落盘前清洗，见方案文档 5.3 第 6 条）。
+- FTS5 建表必须显式配置中文分词（unicode61 对中文无效）。
