@@ -7,3 +7,8 @@ root = true
 charset = utf-8-bom
 end_of_line = crlf
 insert_final_newline = true
+
+# .bat/.cmd 必须无 BOM（cmd 不识别 BOM，会把 BOM 字节当命令）且 CRLF（标签/goto 解析依赖）
+[*.{bat,cmd}]
+charset = utf-8
+end_of_line = crlf

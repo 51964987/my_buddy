@@ -42,3 +42,29 @@ def test_move_and_remove_tree(guard):
     assert guard.exists("inbox/_archived/e1-t0/payload.json")
     guard.remove_tree("capture", "inbox/_archived/e1-t0")
     assert not guard.exists("inbox/_archived/e1-t0")
+
+
+def test_patch_note_fields_whitelist(guard):
+    rel = "sources/web/2026/abc/note.md"
+    guard.write_text(
+        "normalize", rel,
+        "---\nid: abc\nstatus: normalized\ntitle: keep me\ntags: []\n---\n\n正文保持不变\n",
+    )
+
+    # 白名单内字段可补丁更新
+    fm = guard.patch_note_fields("enrich", rel, {"tags": ["a"]}, {"tags", "ai"})
+    assert fm["tags"] == ["a"]
+
+    # 越界字段拒绝（即使区域允许，字段不白名单也拦下）并计数
+    with pytest.raises(WriteBoundaryError):
+        guard.patch_note_fields("enrich", rel, {"title": "篡改"}, {"tags", "ai"})
+    assert guard.violations["enrich"] == 1
+
+    # 正文与其他字段原样保留
+    text = guard.kb_root.joinpath(*rel.split("/")).read_text(encoding="utf-8")
+    assert "title: keep me" in text
+    assert "正文保持不变" in text
+
+    # 不存在的文件拒绝
+    with pytest.raises(WriteBoundaryError):
+        guard.patch_note_fields("enrich", "sources/web/2026/none/note.md", {"tags": []}, {"tags", "ai"})

@@ -3,3 +3,4 @@ __pycache__/
 .pytest_cache/
 kb/
 kbserver.config.json
+kb_service*.log

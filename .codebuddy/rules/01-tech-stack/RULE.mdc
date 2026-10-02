@@ -24,5 +24,6 @@ updatedAt: 2026-10-02T02:00:00.000Z
 ## 平台约束
 
 - 目标运行环境 Windows：路径字面量一律 ASCII；注意 MAX_PATH（D 类章节路径落盘前清洗，见方案文档 5.3 第 6 条）。
-- FTS5 建表必须显式配置中文分词（unicode61 对中文无效）。
+- FTS5 中文检索：jieba 搜索引擎模式预分词后入索引列（空格分隔，unicode61 按 token 切分），索引与查询共用同一 segment 实现；依据方案文档 §9 决策 5（v0.15 定稿）与 §5.1 index 实施口径。
+- FTS5 虚拟表禁止 `INSERT OR REPLACE`（实测内容表残留旧文本、新词不进倒排索引）；更新文档必须显式 `DELETE` 后 `INSERT`。
 - PowerShell 脚本（`.ps1`/`.psm1`/`.psd1`）一律保存为 **UTF-8 with BOM**：Windows PowerShell 5.1 对无 BOM 脚本按 ANSI（GBK）解析，中文输出乱码、字面量失真；由 `.editorconfig` 机械保证，编辑或新建脚本时不得改回无 BOM。

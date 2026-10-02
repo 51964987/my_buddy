@@ -33,7 +33,28 @@ DEFAULTS: dict[str, Any] = {
         "max_images": 30,
         "fetch_timeout": 20.0,
     },
-    "ai": {},
+    "ai": {
+        # enabled=False 时管道不调用任何 LLM；用户配置好 provider/环境变量后再开启
+        "enabled": False,
+        # provider 表（§9 决策 4）：api_key 不落盘，只记环境变量名，运行时从 os.environ 读取
+        "providers": {
+            "glm": {
+                "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                "model": "glm-4-flash",
+                "api_key_env": "ZHIPUAI_API_KEY",
+            },
+        },
+        # 任务分级：标签便宜快模型、摘要卡强模型；concept_card 任务槽预留（不自动生成）
+        "tasks": {
+            "tags": {"provider": "glm", "model": ""},
+            "summary_card": {"provider": "glm", "model": ""},
+            "concept_card": {"provider": "", "model": ""},
+        },
+        "timeout": 60.0,
+        "max_attempts": 3,
+        "poll_interval": 5.0,
+        "batch_size": 5,
+    },
 }
 
 

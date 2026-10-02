@@ -1,6 +1,6 @@
 """API 网关（§11.1）：Capture / Query·运维 / 参数设置 三组路由（Collection 任务 API 随 P2 落地）。
 
-token 鉴权；Query API P0 骨架先行，检索能力 P4 补齐；写操作只转交守卫。
+token 鉴权；Query·运维 API 含检索（P4 起，索引引擎懒同步）与索引重建指令；写操作只转交守卫。
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from .capture import CaptureError, accept_capture
 from .config import Config
 from .frontmatter import split_note
 from .guard import Guard
+from .indexer import Indexer
 from .orchestrator import Orchestrator
 
 KB_REGIONS = ("inbox", "sources", "collections", "wiki")
@@ -37,10 +38,11 @@ class ConfigUpdateRequest(BaseModel):
     config: dict[str, Any]
 
 
-def create_app(cfg: Config | None = None) -> FastAPI:
+def create_app(cfg: Config | None = None, orchestrator: Orchestrator | None = None) -> FastAPI:
     cfg = cfg or Config()
     guard = Guard(cfg.kb_root)
-    orch = Orchestrator(cfg, guard)
+    orch = orchestrator or Orchestrator(cfg, guard)
+    indexer = Indexer(cfg, guard)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -131,13 +133,26 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @app.post("/api/entries/{entry_id}/rerun", dependencies=[Depends(auth)])
     def rerun_entry(entry_id: str):
-        if not orch.rerun(entry_id):
-            raise HTTPException(status_code=404, detail=f"no error-state entry in inbox: {entry_id}")
-        return {"rerun": True, "entry_id": entry_id}
+        # inbox error（normalize 阶段）与 sources error（enrich 阶段）二选一复活
+        if orch.rerun(entry_id) or orch.rerun_enrich(entry_id):
+            return {"rerun": True, "entry_id": entry_id}
+        raise HTTPException(status_code=404, detail=f"no rerunnable error entry: {entry_id}")
+
+    @app.post("/api/enrich/run", dependencies=[Depends(auth)])
+    def enrich_run(entry_id: str | None = None):
+        result = orch.enrich_run(entry_id)
+        if not result.get("enabled", True):
+            raise HTTPException(status_code=409, detail="AI enrich is disabled in config (ai.enabled)")
+        return result
+
+    @app.get("/api/search", dependencies=[Depends(auth)])
+    def search(q: str, limit: int = 20):
+        # P4 实施口径：查询时懒同步（TTL 限频），检索结果始终对齐当前库文件
+        return indexer.search(q, limit=limit)
 
     @app.post("/api/index/rebuild", dependencies=[Depends(auth)])
     def rebuild_index():
-        raise HTTPException(status_code=503, detail="index engine lands in P4; rebuild command not available yet")
+        return indexer.rebuild()
 
     @app.get("/api/config", dependencies=[Depends(auth)])
     def get_config():

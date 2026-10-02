@@ -1,7 +1,8 @@
 """写边界守卫（§11.4 门禁系统）：所有落盘的唯一通道。
 
 区域白名单 + 路径校验 + 原子写（tmp + rename）；越界拒绝并计数。
-enrich 阶段的字段级白名单（ai.*/tags）随 P3 实现。
+enrich 阶段字段级白名单：对源条目 frontmatter 只允许补丁式更新
+（patch 键必须 ⊆ 调用方显式声明的 field_whitelist），见 patch_note_fields。
 """
 
 from __future__ import annotations
@@ -13,6 +14,10 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any
+
+import yaml
+
+from .frontmatter import split_note
 
 REGION_INBOX = "inbox"
 REGION_SOURCES = "sources"
@@ -77,6 +82,31 @@ class Guard:
 
     def write_json(self, stage: str, rel: str, obj: Any) -> Path:
         return self.write_text(stage, rel, json.dumps(obj, ensure_ascii=False, indent=2))
+
+    def patch_note_fields(self, stage: str, rel: str, patch: dict, field_whitelist: set[str]) -> dict:
+        """frontmatter 字段级补丁（§4.4 纪律 2）。
+
+        仅允许更新 field_whitelist 声明的键；越界（试图改其他字段）拒绝并计数。
+        正文 body 原样保留；写回经原子写。返回更新后的 frontmatter。
+        """
+        illegal = sorted(set(patch) - set(field_whitelist))
+        if illegal:
+            self._reject(stage, rel, f"fields not in whitelist {sorted(field_whitelist)}: {illegal}")
+            raise AssertionError
+        path = self._check(stage, rel)
+        if not path.exists():
+            self._reject(stage, rel, "note.md does not exist")
+            raise AssertionError
+        fm, body = split_note(path.read_text(encoding="utf-8"))
+        fm.update(patch)
+        text = "---\n" + yaml.safe_dump(fm, allow_unicode=True, sort_keys=False) + "---\n\n" + body
+        atomic_write(path, text.encode("utf-8"))
+        return fm
+
+    def resolve(self, stage: str, rel: str) -> Path:
+        """校验并解析路径（不做写盘）：供 stage 使用非守卫写工具（如 SQLite 直写
+        index.db）时确认授权边界——区域校验与 write_bytes 同源，越界同样拒绝并计数。"""
+        return self._check(stage, rel)
 
     def exists(self, rel: str) -> bool:
         return self.kb_root.joinpath(*Path(rel.replace("\\", "/")).parts).exists()

@@ -6,4 +6,5 @@ markdownify>=0.13
 beautifulsoup4>=4.12
 PyYAML>=6.0
 pydantic>=2.7
+jieba==0.42.1
 pytest>=8.0

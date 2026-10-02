@@ -90,9 +90,74 @@ def test_token_enforced_when_configured_at_startup(cfg):
         assert client.get("/api/status", headers={"X-KB-Token": "topsecret"}).status_code == 200
 
 
-def test_index_rebuild_is_p4_stub(cfg):
+def test_search_and_index_rebuild_api(cfg, guard):
+    from .test_indexer import make_note
+
+    make_note(guard, "sources/a/note.md", title="SQLite 全文检索笔记", body="FTS5 建表要显式配置中文分词。", status="normalized")
     app = create_app(cfg)
     with TestClient(app) as client:
+        # 首次检索触发懒同步（含建库）
+        resp = client.get("/api/search", params={"q": "分词"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["results"][0]["kind"] == "entry"
+        assert "分词" in data["results"][0]["snippet"]
+
+        # 重建指令：全量重扫
         resp = client.post("/api/index/rebuild")
-        assert resp.status_code == 503
-        assert "P4" in resp.json()["detail"]
+        assert resp.status_code == 200
+        assert resp.json()["rebuilt"] is True
+        assert resp.json()["docs"] == 1
+
+        # 空查询 / 纯符号查询 → 空结果不报错（不拼 MATCH）
+        for bad_q in ("", "!!!"):
+            resp = client.get("/api/search", params={"q": bad_q})
+            assert resp.status_code == 200
+            assert resp.json()["total"] == 0
+
+
+def test_enrich_run_and_rerun_api(cfg, guard):
+    from kbserver.enrich import Enricher
+    from kbserver.orchestrator import Orchestrator
+
+    class FakeLLM:
+        def __call__(self, task):
+            replies = {
+                "tags": '["api"]',
+                "summary_card": '{"summary": "摘要", "card": "## 要点"}',
+            }
+
+            class _C:
+                def chat(self, messages, temperature=0.2):
+                    return replies[task]
+
+            return _C()
+
+    orch = Orchestrator(
+        cfg,
+        guard,
+        fetcher=make_fetcher(pages={"https://example.com/api3": SAMPLE_HTML}),
+        enricher=Enricher(cfg, guard, client_factory=FakeLLM()),
+    )
+    app = create_app(cfg, orchestrator=orch)
+    with TestClient(app) as client:
+        # ai.enabled 默认 False → 409 明确拒绝
+        resp = client.post("/api/enrich/run")
+        assert resp.status_code == 409
+
+        client.post("/api/capture", json={"url": "https://example.com/api3", "entry": "cli"})
+        orch.scan_once()
+        entry_id = client.get("/api/entries").json()["entries"][0]["id"]
+
+        cfg.data["ai"]["enabled"] = True
+        resp = client.post("/api/enrich/run", json=None, params={"entry_id": entry_id})
+        assert resp.status_code == 200
+        assert resp.json()["outcome"] == "enriched"
+
+        status = client.get("/api/status").json()
+        assert status["enrich"]["enriched"] == 1
+        assert status["ai_enabled"] is True
+
+        # 非 error 态条目 rerun：inbox 与 enrich 两条路都找不到 → 404
+        assert client.post(f"/api/entries/{entry_id}/rerun").status_code == 404
