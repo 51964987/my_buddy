@@ -16,6 +16,8 @@ from typing import Any
 MASK = "******"
 SENSITIVE_KEYS = {"token", "api_key"}
 
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", ""}
+
 DEFAULTS: dict[str, Any] = {
     "kb_root": "",
     "host": "127.0.0.1",
@@ -110,3 +112,14 @@ class Config:
         _deep_merge(self.data, _strip_masks(copy.deepcopy(patch), self.data))
         after = (self.data.get("host"), self.data.get("port"))
         return after != before
+
+
+def check_listen_security(cfg: Config) -> None:
+    host = str(cfg.data.get("host") or "")
+    if host in LOOPBACK_HOSTS:
+        return
+    if not (cfg.data.get("token") or "").strip():
+        raise RuntimeError(
+            f"host '{host}' is non-loopback: token must be configured "
+            "(safety rule: LAN listening requires token; desktop clients should use 127.0.0.1)"
+        )

@@ -27,7 +27,10 @@ my_buddy/
 │   ├── config.py            # 配置中心（掩码 + 原子写）
 │   ├── cli.py               # 命令行投递入口
 │   └── __main__.py          # python -m kbserver
-├── tests/                   # pytest（27 用例，覆盖 P0 判据）
+├── tests/                   # pytest（覆盖 P0 判据与安全校验）
+├── extension/               # MV3 浏览器扩展（P1：右键/快捷键剪藏 + 离线暂存重发）
+├── scripts/
+│   └── backup_kb.ps1        # kb/ 文件级备份（robocopy，P1）
 ├── .codebuddy/rules/        # AI 协作规则（核心铁律/技术栈/工作流/设计索引/UI 约束）
 ├── AGENTS.md                # 跨 AI 工具入口指引
 └── kb/                      # 知识库数据目录（服务启动时创建）
@@ -62,7 +65,7 @@ Python 3.12 · FastAPI · uvicorn · SQLite（FTS5 + sqlite-vec）· trafilatura
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | P0 | schema 定稿 + 服务骨架（capture API + 归一化落盘） | 已完成 |
-| P1 | 浏览器扩展 + 手机投递 + 局域网监听 | 未开始 |
+| P1 | 浏览器扩展 + 手机投递 + 局域网监听 | 已完成 |
 | P2a/b/c | 飞书 API / 论坛抓取 / 文档站集合同步 adapter | 未开始 |
 | P3 | AI 整理流水线（分级模型，重试与断点） | 未开始 |
 | P4 | 全文 + 向量索引（经 Query API） | 未开始 |

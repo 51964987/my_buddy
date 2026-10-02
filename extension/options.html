@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>kb buddy clipper 设置</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 24px auto; padding: 0 16px; color: #1f2937; }
+    label { display: block; margin: 16px 0 4px; font-weight: 600; }
+    input { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #d1d5db; border-radius: 6px; }
+    button { margin-top: 16px; padding: 8px 16px; border: 0; border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer; }
+    button.secondary { background: #6b7280; }
+    #queue { margin-top: 16px; color: #6b7280; }
+    #saved { color: #16a34a; margin-left: 8px; }
+    .hint { color: #9ca3af; font-size: 12px; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <h3>kb buddy clipper</h3>
+  <label for="server">服务地址</label>
+  <input id="server" placeholder="http://127.0.0.1:8765" />
+  <div class="hint">桌面默认 127.0.0.1；局域网内服务需在 manifest.json 的 host_permissions 中补充对应网段。</div>
+  <label for="token">token（服务端配置了 token 时必填）</label>
+  <input id="token" type="password" placeholder="X-KB-Token" />
+  <div>
+    <button id="save">保存</button><span id="saved"></span>
+    <button id="flush" class="secondary">立即重发离线队列</button>
+  </div>
+  <div id="queue">离线暂存条数：-</div>
+  <script src="options.js"></script>
+</body>
+</html>

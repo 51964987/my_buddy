@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "kb buddy clipper",
+  "version": "0.1.0",
+  "description": "剪藏当前页到 kbserver（URL + 标题 + 选中文本 + 截图；离线暂存自动重发）",
+  "permissions": ["activeTab", "contextMenus", "storage", "alarms", "scripting"],
+  "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js" },
+  "options_page": "options.html",
+  "commands": {
+    "clip-page": {
+      "suggested_key": { "default": "Alt+Shift+S" },
+      "description": "剪藏当前页"
+    }
+  }
+}

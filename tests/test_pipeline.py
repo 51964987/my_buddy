@@ -113,6 +113,20 @@ def test_text_note_e2e(cfg, guard):
     assert "url:" not in note.split("---")[1]
 
 
+def test_screenshot_saved(cfg, guard):
+    import base64
+
+    orch = Orchestrator(cfg, guard, fetcher=make_fetcher(pages={"https://example.com/shot": SAMPLE_HTML}))
+    shot = base64.b64encode(b"\x89PNG-fake-screenshot").decode()
+    r = _capture(guard, "https://example.com/shot", screenshot_b64=shot, entry="browser_ext")
+    orch.scan_once()
+    entry_dir = guard.kb_root.joinpath(*f"sources/web/2026/{r['entry_id']}".split("/"))
+    assert (entry_dir / "raw" / "screenshot.png").read_bytes() == b"\x89PNG-fake-screenshot"
+    meta = json.loads((entry_dir / "meta.json").read_text("utf-8"))
+    assert meta["raw_files"] == ["raw/page.html", "raw/screenshot.png"]
+    assert meta["captured_from"] == "browser_ext"
+
+
 def test_image_localization(cfg, guard):
     from kbserver.normalize import _localize_images
 

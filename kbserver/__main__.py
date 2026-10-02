@@ -5,11 +5,15 @@ from __future__ import annotations
 import uvicorn
 
 from .app import create_app
-from .config import Config
+from .config import Config, check_listen_security
 
 
 def main() -> None:
     cfg = Config()
+    try:
+        check_listen_security(cfg)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc))
     app = create_app(cfg)
     uvicorn.run(
         app,
