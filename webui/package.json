@@ -1,0 +1,26 @@
+{
+  "name": "kb-webui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node scripts/check-table-scroll.mjs && vue-tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@types/dompurify": "^3.0.5",
+    "docx": "^9.8.1",
+    "dompurify": "^3.4.16",
+    "fflate": "^0.8.3",
+    "marked": "^18.0.14",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "~5.7.2",
+    "vite": "^6.0.7",
+    "vue-tsc": "^2.2.0"
+  }
+}

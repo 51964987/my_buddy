@@ -1,0 +1,847 @@
+/* kb buddy 工作台全局样式：手写轻量风格（§11.7 示意图仅约束布局与信息架构） */
+
+:root {
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --line: #e3e6ea;
+  --text: #1f2430;
+  --muted: #6b7280;
+  --accent: #2f6fed;
+  --accent-weak: #e8effd;
+  --ok: #16803c;
+  --warn: #b45309;
+  --danger: #b91c1c;
+  --sidebar-bg: #171c26;
+  --sidebar-text: #9aa3b2;
+  --radius: 10px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+#app {
+  display: flex;
+  min-height: 100vh;
+}
+
+/* ---------- 侧栏（折叠/展开，状态存浏览器本地） ---------- */
+
+.sidebar {
+  /* 侧栏钉在视口（业界通行做法）：内容区滚动时导航始终可见 */
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  align-self: flex-start;
+  overflow-y: auto;
+  width: 200px;
+  background: var(--sidebar-bg);
+  color: var(--sidebar-text);
+  display: flex;
+  flex-direction: column;
+  padding: 14px 10px;
+  gap: 4px;
+  transition: width 0.15s ease;
+  flex-shrink: 0;
+}
+
+.sidebar.collapsed {
+  width: 56px;
+}
+
+.sidebar .brand {
+  color: #e8ebf0;
+  font-weight: 600;
+  padding: 6px 10px 14px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.sidebar.collapsed .brand {
+  visibility: hidden;
+  height: 40px;
+  padding: 6px 10px 14px;
+}
+
+.nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  color: var(--sidebar-text);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.nav-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #e8ebf0;
+}
+
+.nav-item.router-link-active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.nav-item svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+/* 折叠态：图标窄栏 + tooltip（§11.7） */
+.sidebar.collapsed .nav-label {
+  display: none;
+}
+
+.sidebar.collapsed .nav-item:hover::after {
+  content: attr(data-title);
+  position: absolute;
+  left: 60px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: #000c;
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  z-index: 30;
+}
+
+/* 审核台待办角标：展开态数字徽章，折叠态红点（§11.7） */
+.nav-badge {
+  margin-left: auto;
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px;
+  border-radius: 9px;
+  padding: 1px 6px;
+  line-height: 16px;
+}
+
+.sidebar.collapsed .nav-badge {
+  margin-left: 0;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 0;
+  position: absolute;
+  right: 8px;
+  top: 8px;
+}
+
+/* ---------- 主内容区 ---------- */
+
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 顶栏：吸附在滚动区顶部，常驻显示当前页标题（§11.7 布局，参考豆包/Notion/GitHub） */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 28px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+
+.topbar h1 {
+  font-size: 17px;
+  margin: 0;
+  font-weight: 600;
+}
+
+.topbar-toggle {
+  position: relative;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+}
+
+.topbar-toggle:hover {
+  background: var(--accent-weak);
+  color: var(--accent);
+}
+
+/* 顶栏切换按钮 tooltip：按钮右侧浮出 */
+.topbar-toggle:hover::after {
+  content: attr(data-title);
+  position: absolute;
+  left: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: #000c;
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+  z-index: 50;
+}
+
+.main-body {
+  padding: 20px 28px 28px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+
+.panel h2 {
+  font-size: 15px;
+  margin: 0 0 12px;
+}
+
+.grid-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 12px;
+  /* 与 .panel 之间保持同 panel 间距一致（panel 间距靠 margin-bottom 提供，本容器非 panel 需自带） */
+  margin-bottom: 16px;
+}
+
+.stat-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+
+.stat-card .num {
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.stat-card .label {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+/* ---------- 通用控件 ---------- */
+
+button {
+  font: inherit;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+button.primary:hover {
+  opacity: 0.9;
+  color: #fff;
+}
+
+button.danger {
+  color: var(--danger);
+  border-color: #efc4c4;
+}
+
+button.danger:hover {
+  background: #fdf1f1;
+  border-color: var(--danger);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+input[type='text'],
+input[type='password'],
+input[type='number'],
+select {
+  font: inherit;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: #fff;
+  color: var(--text);
+}
+
+input:focus,
+select:focus {
+  outline: 2px solid var(--accent-weak);
+  border-color: var(--accent);
+}
+
+table.list {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+table.list th,
+table.list td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+table.list th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+table.list tr:hover td {
+  background: #fafbfc;
+}
+
+/* ---------- 下拉浮层（v0.28 文档树导出，行为见 PopoverMenu.vue） ---------- */
+/* 根作定位上下文：触发器收缩到内容宽，浮层绝对定位在其下方 */
+.popover-menu {
+  position: relative;
+  display: inline-block;
+}
+
+/* 触发按钮：文字与 chevron 之间留 8px 间距（用户实测要求"空一格"；Ant Design Dropdown /
+   Element Plus 通行 4~8px）。刻意不复用 .tree-dir——那类带 margin-left:auto（chevron 推到
+   行尾），行内按钮容器宽度=内容宽、无剩余空间，auto 退化成 0，箭头贴字 */
+.popover-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* chevron：收起指向右、展开旋转指向下（与目录树行同一视觉语言） */
+.popover-trigger::after {
+  content: '';
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+}
+
+.popover-trigger[aria-expanded='true']::after {
+  transform: rotate(45deg);
+}
+
+.popover-menu-items {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 10;
+  /* width:max-content 突破包含块宽度限制：absolute 元素的可用宽默认取包含块（触发器）宽，
+     菜单项会逐字折行；max-width 封顶防超长项把浮层拉得过宽（与 table min-width 同款思路） */
+  width: max-content;
+  max-width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px #0002;
+}
+
+.popover-menu-items button {
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+
+/* 鼠标悬停与键盘焦点同款高亮（键盘遍历时焦点必须可见） */
+.popover-menu-items button:hover:not(:disabled),
+.popover-menu-items button:focus-visible {
+  background: var(--accent-weak);
+  color: var(--text);
+}
+
+/* 浮层分组标签（v0.29：目录索引 / 全文） */
+.popover-menu-group {
+  padding: 4px 10px 2px;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 2px;
+}
+
+/* 长文本自适应（业界 tables 通行做法：弹性主列 + min-width 下限 + 省略号封顶）：
+   - td.cell-main 弹性列加 min-width 下限：窄视口被压缩时不低于下限（防止比例压缩到一字一行），
+     宽视口仍可伸展——先给标签等固定列留足空间，标题列吃剩余宽度；
+   - .cell-ellipsis 长文本（URL 等）单行省略号截断并封顶 max-content 贡献，不撑宽整列；
+   - 悬停看全文由各视图用 title 属性提示 */
+table.list td.cell-main {
+  min-width: 280px;
+}
+
+.cell-ellipsis {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 表格行内操作按钮组：横向排列不折行，间距统一（业界操作列通行做法） */
+.row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.row-actions button {
+  padding: 4px 12px;
+}
+
+/* 宽表横向滚动兜底：容器内滚，不撑破面板（参考 GitHub 设置页宽表做法） */
+.table-scroll {
+  overflow-x: auto;
+}
+
+.table-scroll table.list {
+  min-width: 760px;
+}
+
+/* 操作列冻结在右缘（业界 fixed column 模式）：横滚时删除按钮始终可见可点 */
+.table-scroll th:last-child,
+.table-scroll td:last-child {
+  position: sticky;
+  right: 0;
+  background: var(--panel);
+  box-shadow: -6px 0 6px -6px #0003;
+}
+
+.table-scroll tr:hover td:last-child {
+  background: #fafbfc; /* 与行悬停底色一致，避免冻结列露出"补丁" */
+}
+
+/* ---------- 状态徽章（§4.2 枚举原文）与 AI 标识 ---------- */
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  border-radius: 6px;
+  padding: 1px 8px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.badge.st-inbox {
+  background: #eef1f5;
+  color: var(--muted);
+}
+
+.badge.st-normalized {
+  background: var(--accent-weak);
+  color: var(--accent);
+}
+
+.badge.st-enriched {
+  background: #e5f5ea;
+  color: var(--ok);
+}
+
+.badge.st-error {
+  background: #fdeaea;
+  color: var(--danger);
+}
+
+.badge.st-draft {
+  background: #fdf3e3;
+  color: var(--warn);
+}
+
+.badge.st-promoted {
+  background: #e5f5ea;
+  color: var(--ok);
+}
+
+.badge.ai-mark {
+  background: #f1e8fd;
+  color: #6d3fc0;
+  border: 1px solid #ddccf5;
+}
+
+.tag {
+  display: inline-block;
+  background: #eef1f5;
+  color: var(--muted);
+  font-size: 11px;
+  border-radius: 5px;
+  padding: 0 7px;
+  margin-right: 4px;
+  line-height: 18px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.mono {
+  font-family: Consolas, monospace;
+  font-size: 12px;
+}
+
+/* ---------- 提示条 ---------- */
+
+.alert {
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  font-size: 13px;
+}
+
+.alert.error {
+  background: #fdeaea;
+  color: var(--danger);
+}
+
+.alert.ok {
+  background: #e5f5ea;
+  color: var(--ok);
+}
+
+.alert.warn {
+  background: #fdf3e3;
+  color: var(--warn);
+}
+
+/* ---------- 设置表单 ---------- */
+
+.form-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap; /* 窄屏折行兜底：提示/控件换行而非横向撑破（hint 含不可断行 URL） */
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px dashed var(--line);
+}
+
+.form-row:last-child {
+  border-bottom: none;
+}
+
+.form-row label {
+  width: 220px;
+  flex-shrink: 0;
+}
+
+.form-row .hint {
+  color: var(--muted);
+  font-size: 12px;
+  flex: 1;
+}
+
+/* ---------- 导出进度（v0.39） ---------- */
+
+.export-progress {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 14px;
+}
+
+.export-progress-bar {
+  flex: 1;
+  min-width: 160px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.export-progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--ok);
+  transition: width 0.15s ease;
+}
+
+/* 不确定态（无 Content-Length 或不可计阶段）：流纹动画表达"进行中" */
+.export-progress-fill.indeterminate {
+  width: 100%;
+  background-image: repeating-linear-gradient(-45deg, var(--ok) 0 10px, transparent 10px 20px);
+  animation: export-slide 1s linear infinite;
+}
+
+@keyframes export-slide {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 28px 0;
+  }
+}
+
+.export-progress-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.export-progress-detail {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.hot-tag,
+.restart-tag {
+  font-size: 11px;
+  border-radius: 5px;
+  padding: 0 6px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.hot-tag {
+  background: #e5f5ea;
+  color: var(--ok);
+}
+
+.restart-tag {
+  background: #eef1f5;
+  color: var(--muted);
+}
+
+/* ---------- 详情/抽屉 ---------- */
+
+.detail-body {
+  white-space: pre-wrap;
+  background: #fafbfc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  max-height: 420px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.badge.human-mark {
+  background: #e8f1fd;
+  color: #1c5aa8;
+  border: 1px solid #c5daf7;
+}
+
+.card-detail {
+  background: #fafbfc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  max-height: 520px;
+  overflow: auto;
+}
+
+.card-meta {
+  margin: 0 0 6px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.card-edit textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  resize: vertical;
+  background: #fff;
+}
+
+/* md-body：渲染后的 Markdown（经 marked + DOMPurify 净化，见 webui/src/markdown.ts） */
+.md-body {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 13px;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+
+.md-body > :first-child {
+  margin-top: 0;
+}
+
+.md-body > :last-child {
+  margin-bottom: 0;
+}
+
+.md-body h1,
+.md-body h2,
+.md-body h3 {
+  margin: 14px 0 6px;
+  line-height: 1.4;
+}
+
+.md-body h1 {
+  font-size: 16px;
+}
+
+.md-body h2 {
+  font-size: 15px;
+}
+
+.md-body h3 {
+  font-size: 14px;
+}
+
+.md-body p,
+.md-body ul,
+.md-body ol,
+.md-body pre,
+.md-body blockquote,
+.md-body table {
+  margin: 8px 0;
+}
+
+.md-body ul,
+.md-body ol {
+  padding-left: 22px;
+}
+
+.md-body code {
+  background: #eef1f5;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12px;
+}
+
+.md-body pre {
+  background: #f2f4f7;
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow: auto;
+}
+
+.md-body pre code {
+  background: none;
+  padding: 0;
+}
+
+.md-body blockquote {
+  border-left: 3px solid var(--line);
+  margin-left: 0;
+  padding-left: 12px;
+  color: var(--muted);
+}
+
+.md-body img {
+  max-width: 100%;
+}
+
+.md-body table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+
+.md-body th,
+.md-body td {
+  border: 1px solid var(--line);
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.tree-node {
+  padding: 2px 0;
+}
+
+.tree-dir {
+  color: var(--text);
+  font-weight: 400; /* 与页面行统一字重（v0.26）：可展开性由 chevron 表达，不靠字重 */
+  cursor: pointer;
+  padding: 3px 6px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  list-style: none; /* 隐藏 details 原生三角，用自定义 chevron */
+}
+
+.tree-dir::-webkit-details-marker {
+  display: none;
+}
+
+/* 展开指示 chevron：收起指向右、展开旋转指向下（参考源站树形导航） */
+.tree-dir::after {
+  content: '';
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+}
+
+details[open] > summary.tree-dir::after {
+  transform: rotate(45deg);
+}
+
+.tree-dir:hover {
+  background: var(--accent-weak);
+}
+
+.tree-page {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 3px 6px; /* 与目录行统一内边距（v0.26）：同级行排版一致 */
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.tree-page:hover {
+  background: var(--accent-weak);
+}
+
+.tree-children {
+  margin-left: 18px;
+  border-left: 1px solid var(--line);
+  padding-left: 10px;
+}
