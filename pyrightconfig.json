@@ -1,0 +1,10 @@
+// Pyright 配置：指定 venv312 解释器（服务实际运行环境，v0.36 起依赖装在该环境）
+// 说明：venvPath + venv 组合由 pyright 自动解析 site-packages（含 jieba/sqlite-vec 等
+// 延迟导入依赖），比逐条 extraPaths 更稳；换 venv 只改这里。
+{
+  "venvPath": "D:\\venvs",
+  "venv": "312",
+  "pythonVersion": "3.12",
+  "include": ["kbserver", "tests", "scripts"],
+  "exclude": ["**/__pycache__", "**/*.pyc", "kbserver/static", "webui", "docs"]
+}
