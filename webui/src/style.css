@@ -845,3 +845,23 @@ details[open] > summary.tree-dir::after {
   border-left: 1px solid var(--line);
   padding-left: 10px;
 }
+
+/* 首抓/同步实时进度条（v0.51） */
+.progress-track {
+  height: 10px;
+  background: #e5e7eb;
+  border-radius: 5px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: #3b82f6;
+  border-radius: 5px;
+  transition: width 0.4s ease;
+}
+
+/* 目录树当前打开页高亮（v0.52，替代误染全部节点的 mono 类） */
+.tree-page-active {
+  font-weight: 600;
+  color: #2563eb;
+}

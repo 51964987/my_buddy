@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -30,6 +31,9 @@ from urllib.parse import urlsplit
 from .guard import Guard
 from .idgen import collection_page_id
 from .normalize import extract_markdown, normalize_collection_page
+
+# v0.51：同步过程日志（开始/进度/完成）走 kbserver.sync，httpx 逐请求噪音已在 logsetup 降噪
+logger = logging.getLogger("kbserver.sync")
 
 # 章节落盘路径约束（§5.3 第 6 条：Windows MAX_PATH 提前设防）
 MAX_DOC_PATH_LEN = 160
@@ -310,6 +314,12 @@ class SyncEngine:
         self.cfg = cfg
         self.guard = guard
         self.parsers = parsers if parsers is not None else PARSERS
+        # v0.51 首抓/同步进度（内存态，仅本次进程有效）：collection_id → {phase, done, total, errors}
+        # 不落盘——进度是瞬时可观测信息，collection.json 的 sync.* 才是持久状态
+        self._progress: dict[str, dict] = {}
+
+    def get_progress(self, collection_id: str) -> dict:
+        return dict(self._progress.get(collection_id) or {})
 
     # ---- collection.json 读写（均经守卫，sync 阶段） ----
 
@@ -450,6 +460,10 @@ class SyncEngine:
             coll["sync"]["state"] = "error"
             coll["sync"]["last_error"] = f"{type(exc).__name__}: {exc}"[:500]
             self._write_json(self._coll_rel(collection_id), coll)
+            # v0.51：失败也定格进度（phase=error），前端轮询可见；日志记全堆栈
+            prog = self._progress.get(collection_id) or {}
+            self._progress[collection_id] = {**prog, "phase": "error"}
+            logger.error("同步失败：%s %s", collection_id, coll["sync"]["last_error"], exc_info=True)
             raise
         coll["sync"].update(
             state="ok",
@@ -481,6 +495,13 @@ class SyncEngine:
                     dirs.append({"path": rel, "title": node.title, "index": node.index})
         page_nodes = [n for n in nodes if not n.is_dir]
 
+        # v0.51：进度初始化（内存态，经 /sync/progress 端点暴露）+ 开始日志
+        total = len(page_nodes)
+        is_full_fetch = not old_pages
+        self._progress[collection_id] = {"phase": "fetch", "done": 0, "total": total, "errors": 0}
+        logger.info("开始%s：%s 共 %d 页", "首抓" if is_full_fetch else "增量同步", collection_id, total)
+        log_every = max(1, total // 10)
+
         # 逐页抓取（content_hash diff 依据）+ 失败页记 errors（可观测、下次同步重试）
         fetched: dict[str, SitePage] = {}
         new_pages: list[dict] = []
@@ -503,6 +524,18 @@ class SyncEngine:
                     }
                 )
                 continue
+            finally:
+                # v0.51：逐页推进进度（成功/失败都要走 finally，continue 才不丢计数）
+                self._progress[collection_id] = {
+                    "phase": "fetch",
+                    "done": i + 1,
+                    "total": total,
+                    "errors": len(errors),
+                }
+                if (i + 1) % log_every == 0 or i + 1 == total:
+                    logger.info(
+                        "抓取进度：%s %d/%d（失败 %d）", collection_id, i + 1, total, len(errors)
+                    )
             new_pages.append(
                 {
                     "path": path,
@@ -528,7 +561,15 @@ class SyncEngine:
         captured_at = _now_iso()
         cfg = self.cfg.data if hasattr(self.cfg, "data") else dict(self.cfg)
         fetcher = self._make_fetcher()
-        for path in added + changed:
+        # v0.51：归一化落盘阶段进度（增量同步时归一化才是耗时段）
+        norm_targets = added + changed
+        norm_total = len(norm_targets)
+        self._progress[collection_id] = {"phase": "normalize", "done": 0, "total": norm_total, "errors": len(errors)}
+        if norm_total:
+            logger.info("归一化落盘：%s 共 %d 页", collection_id, norm_total)
+        norm_log_every = max(1, norm_total // 10)
+
+        for k, path in enumerate(norm_targets):
             page = fetched[path]
             entry_rel = f"collections/{collection_id}/docs/{path}"
             try:
@@ -560,6 +601,18 @@ class SyncEngine:
                         "error_message": f"normalize {type(exc).__name__}: {exc}"[:300],
                     }
                 )
+            finally:
+                # v0.51：归一化阶段逐页推进进度与周期日志
+                self._progress[collection_id] = {
+                    "phase": "normalize",
+                    "done": k + 1,
+                    "total": norm_total,
+                    "errors": len(errors),
+                }
+                if (k + 1) % norm_log_every == 0 or k + 1 == norm_total:
+                    logger.info(
+                        "落盘进度：%s %d/%d（失败 %d）", collection_id, k + 1, norm_total, len(errors)
+                    )
 
         # URL 漂移修复（v0.27）：源站 URL 口径修正后，已落盘页面的 frontmatter url 需同步。
         # 走 sync 阶段字段级补丁只改 url——不动 status/ai.*（内容未变，不触发重新整理与 AI 调用）。
@@ -578,6 +631,13 @@ class SyncEngine:
             "dirs": dirs,
         }
         self._write_json(self._toc_rel(collection_id), toc)
+
+        # v0.51：完成态进度 + 完成汇总日志（added/changed/removed/errors 一次说清）
+        self._progress[collection_id] = {"phase": "done", "done": total, "total": total, "errors": len(errors)}
+        logger.info(
+            "同步完成：%s 页面 %d（added=%d changed=%d removed=%d errors=%d outcomes=%s）",
+            collection_id, len(new_pages), len(added), len(changed), len(removed), len(errors), outcomes,
+        )
 
         return {
             "state_fields": {

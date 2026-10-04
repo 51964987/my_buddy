@@ -188,6 +188,13 @@ def test_first_sync_and_layout(cfg, guard):
     assert result["changed"] == 0
     assert result["removed"] == 0
 
+    # v0.51：首抓结束后内存进度定格为 done（fetch/normalize 两阶段的最终计数）
+    prog = engine.get_progress("test-lib")
+    assert prog["phase"] == "done"
+    assert prog["done"] == 2
+    assert prog["total"] == 2
+    assert engine.get_progress("nope") == {}
+
     note_rel = "collections/test-lib/docs/Guide/Intro/note.md"
     note = guard.kb_root.joinpath(*note_rel.split("/"))
     assert note.exists()
@@ -317,6 +324,15 @@ def test_collection_api_endpoints(cfg, guard):
         # 手动增量同步
         resp3 = client.post("/api/collections/test-lib/sync")
         assert resp3.status_code == 200
+
+        # 同步进度端点（v0.51）：同步为 inline 执行，结束后 phase=done
+        prog = client.get("/api/collections/test-lib/sync/progress")
+        assert prog.status_code == 200
+        p = prog.json()["progress"]
+        assert p["phase"] == "done"
+        assert p["total"] == 2
+        # 未注册 collection 404
+        assert client.get("/api/collections/missing/sync/progress").status_code == 404
 
         # 未注册 collection 404
         assert client.post("/api/collections/missing/sync").status_code == 404

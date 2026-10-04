@@ -58,5 +58,12 @@ def build_log_config(config_path: Path) -> dict:
             "uvicorn": {"level": "INFO", "propagate": True},
             "uvicorn.error": {"level": "INFO", "propagate": True},
             "uvicorn.access": {"level": "INFO", "propagate": True},
+            # v0.51：HTTP 客户端逐请求 INFO 噪音（首抓 314 页 = 314 行），降噪到 WARNING——
+            # 有意义的进度/汇总日志由 kbserver.sync 显式输出
+            "httpx": {"level": "WARNING", "propagate": True},
+            "httpcore": {"level": "WARNING", "propagate": True},
+            # v0.52：trafilatura 提取失败的库内 ERROR 是噪音——extract_markdown 有
+            # markdownify 兜底，页级真实失败会记 sync.errors 与我们的日志，可观测性不依赖它
+            "trafilatura": {"level": "CRITICAL", "propagate": True},
         },
     }

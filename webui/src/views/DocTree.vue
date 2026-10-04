@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** 文档树（消费者姿态）：D 类 collection 目录树浏览，页面内容经 Query API 读取。 */
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { api, type TocDir, type TocPage } from '../api'
 import { buildDocxFromMarkdown, buildMarkdown, downloadBlob, exportFilename, type ExportNode } from '../exporters'
 import { renderMarkdown } from '../markdown'
@@ -29,6 +29,7 @@ const syncing = ref(false)
 const tocNotice = ref('')
 const detail = ref<{ frontmatter: Record<string, unknown>; body: string } | null>(null)
 const detailId = ref('')
+const detailPath = ref('')
 
 // 注册 collection 表单（§11.5 v0.18：注册入口页面化，字段随解析器元数据动态渲染）
 // v0.22 连接向导：入口 URL 失焦自动探测注册表 adapter 并预填；字段提示随元数据下发
@@ -100,7 +101,7 @@ async function submitRegister() {
   regNotice.value = ''
   try {
     await api.post('/api/collections', { ...reg })
-    regNotice.value = `已注册 ${reg.id}，正在后台全量首抓（页面越多耗时越久）；可稍后刷新查看进度。`
+    regNotice.value = `已注册 ${reg.id}，正在后台全量首抓，下方实时显示进度。`
     showRegister.value = false
     await loadCollections()
     await select(reg.id)
@@ -130,17 +131,101 @@ async function select(id: string) {
     const dirMap: Record<string, { title: string; index: number }> = {}
     for (const d of toc.dirs ?? []) dirMap[d.path] = { title: d.title, index: d.index }
     tree.value = buildTree(toc.pages ?? [], dirMap)
+    stopPoll()
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    // 409 = 首抓进行中（目录树尚未生成）：提示而非报错（v0.23 三态口径）
+    // 409 = 首抓进行中（目录树尚未生成）：提示而非报错（v0.23 三态口径），
+    // v0.51 起自动开始轮询实时进度（done/total），完成即自动加载目录树
     if (msg.includes('首抓')) {
       tocNotice.value = msg
       tree.value = []
+      startPoll(id)
     } else {
       error.value = msg
     }
   }
 }
+
+// ---------- 首抓/同步实时进度轮询（§6 v0.51） ----------
+interface SyncProgress {
+  phase: 'fetch' | 'normalize' | 'done' | 'error' | string
+  done: number
+  total: number
+  errors: number
+}
+const syncProgress = ref<SyncProgress | null>(null)
+let pollTimer: number | null = null
+
+function stopPoll() {
+  if (pollTimer !== null) {
+    window.clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+function startPoll(id: string) {
+  stopPoll()
+  pollTimer = window.setInterval(async () => {
+    try {
+      const r = await api.get<{ progress: SyncProgress | null }>(`/api/collections/${id}/sync/progress`)
+      const p = r.progress
+      if (!p || !p.phase) return // 尚未进入抓取循环（如排队中），下一轮再看
+      syncProgress.value = p
+      if (p.phase === 'done') {
+        stopPoll()
+        syncing.value = false
+        tocNotice.value = `首抓完成：共 ${p.total} 页（失败 ${p.errors}）`
+        await select(id) // 完成即自动加载目录树
+        await loadCollections()
+      } else if (p.phase === 'error') {
+        stopPoll()
+        syncing.value = false
+        error.value = '首抓失败：详情见服务日志（logs/kbserver.log）'
+      }
+    } catch {
+      // 网络抖动或瞬时 404：不中断轮询，下一轮重试
+    }
+  }, 2000)
+}
+
+onBeforeUnmount(stopPoll)
+
+// ---------- 详情正文渲染（v0.52） ----------
+// note.md 图片为本地化相对路径 raw/img-*，SPA 下浏览器按当前路由解析必然 404——
+// 渲染前改写到 image API（§6 v0.31 端点，环回无 token 时 <img> 可直接加载）。
+// 仅改写本 collection 的本地化图片；外链图片与 wiki 卡正文不在此处理范围。
+const detailBodyHtml = computed(() => {
+  if (!detail.value) return ''
+  const cid = current.value
+  const dir = detailPath.value
+  let md = detail.value.body
+  // 站点正文常把独立成行的图片包在 <span> 里（如 <span>![图片](raw/img-x.png) </span>）：
+  // marked 不解析 HTML 块内的 Markdown 语法，会把图片当纯文本（v0.31 docx 转换同源问题）——
+  // 渲染前解包只含 Markdown 图片的 span，<span id="..."> 锚点等其余 HTML 保持原样
+  md = md.replace(/<span>((?:\s*!\[[^\]]*\]\([^)]+\)\s*)+)<\/span>/g, '$1')
+  if (cid && dir) {
+    md = md.replace(
+      /(\]\()(raw\/img-[^)\s]+)/g,
+      (_m, pre: string, name: string) =>
+        `${pre}/api/collections/${encodeURIComponent(cid)}/image?path=${encodeURIComponent(dir)}&name=${encodeURIComponent(name.slice(4))}`,
+    )
+  }
+  return renderMarkdown(md)
+})
+
+// 进度条流程化（v0.52）：两阶段折算为一条不回退的总进度（抓取 70% + 归一化 30%），
+// 每阶段显示「阶段 x/2 + 阶段内计数」，前一阶段完成定格 100% 后进入下一阶段
+const progressView = computed(() => {
+  const p = syncProgress.value
+  if (!p || !p.total) return null
+  if (p.phase === 'fetch') {
+    return { label: '阶段 1/2：抓取页面', done: p.done, total: p.total, percent: Math.round((70 * p.done) / p.total) }
+  }
+  if (p.phase === 'normalize') {
+    return { label: '阶段 2/2：归一化落盘', done: p.done, total: p.total, percent: 70 + Math.round((30 * p.done) / p.total) }
+  }
+  return null
+})
 
 function buildTree(pages: TocPage[], dirs: Record<string, { title: string; index: number }>): TreeNode[] {
   // 建树后兄弟节点按源站排序键（Index）升序排列（v0.25）——页面驱动插入的节点创建
@@ -188,6 +273,7 @@ async function openPage(node: TreeNode) {
   try {
     const id = await pageId(current.value, node.path)
     detailId.value = id
+    detailPath.value = node.path
     detail.value = await api.get(`/api/entries/${id}`)
     preview.value = null // 换页即丢弃上一份试跑结果，避免张冠李戴
     aiNotice.value = ''
@@ -272,12 +358,12 @@ async function syncNow() {
   error.value = ''
   try {
     await api.post(`/api/collections/${current.value}/sync`)
-    await select(current.value)
+    // v0.51：轮询实时进度，完成后自动刷新目录树（不再立即 select 拿旧树）
+    startPoll(current.value)
     await loadCollections()
   } catch (e) {
-    error.value = String(e instanceof Error ? e.message : e)
-  } finally {
     syncing.value = false
+    error.value = String(e instanceof Error ? e.message : e)
   }
 }
 
@@ -385,6 +471,18 @@ onMounted(() => {
 
   <div v-if="tocNotice" class="alert warn">{{ tocNotice }}</div>
 
+  <!-- 首抓/同步实时进度（v0.52 流程化）：总百分比不回退（抓取 70% + 归一化 30% 折算），
+       阶段标签 + 阶段内计数；完成后整块消失并自动加载目录树 -->
+  <div v-if="progressView" class="panel" style="margin-bottom: 12px">
+    <div style="display: flex; justify-content: space-between; margin-bottom: 6px">
+      <b>首抓进行中 · {{ progressView.label }}（{{ progressView.done }} / {{ progressView.total }}）</b>
+      <span class="mono">总进度 {{ progressView.percent }}%</span>
+    </div>
+    <div class="progress-track">
+      <div class="progress-fill" :style="{ width: progressView.percent + '%' }"></div>
+    </div>
+  </div>
+
   <div v-if="regNotice" class="alert ok">{{ regNotice }}</div>
 
   <div class="panel" style="display: flex; gap: 10px; align-items: center">
@@ -489,8 +587,10 @@ onMounted(() => {
       <p v-if="!current" class="muted">先注册 collection（POST /api/collections）。</p>
       <div class="tree-node" v-for="n in tree" :key="n.path">
         <template v-if="n.page">
-          <div class="tree-page" @click="openPage(n)">
-            <span :class="{ mono: detailId }">{{ n.page.title || n.name }}</span>
+          <!-- v0.52 修复：原 :class="{ mono: detailId }" 在任意详情打开时把所有顶级页面一起变样式——
+               改为仅高亮当前打开页（detailPath 精确匹配） -->
+          <div class="tree-page" :class="{ 'tree-page-active': detailPath === n.path }" @click="openPage(n)">
+            {{ n.page.title || n.name }}
           </div>
         </template>
         <template v-else>
@@ -499,7 +599,9 @@ onMounted(() => {
             <div class="tree-children" v-for="c in n.children" :key="c.path">
               <div class="tree-node">
                 <template v-if="c.page">
-                  <div class="tree-page" @click="openPage(c)">{{ c.page.title || c.name }}</div>
+                  <div class="tree-page" :class="{ 'tree-page-active': detailPath === c.path }" @click="openPage(c)">
+                    {{ c.page.title || c.name }}
+                  </div>
                 </template>
                 <template v-else>
                   <details>
@@ -558,7 +660,7 @@ onMounted(() => {
         <p style="margin: 6px 0 0"><button class="primary" @click="enrichThisOne">满意，落盘这一条</button></p>
       </div>
 
-      <div class="md-body" v-html="renderMarkdown(detail.body)"></div>
+      <div class="md-body" v-html="detailBodyHtml"></div>
     </div>
   </div>
 </template>

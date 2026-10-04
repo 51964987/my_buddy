@@ -152,6 +152,16 @@ def create_app(cfg: Config | None = None, orchestrator: Orchestrator | None = No
             raise HTTPException(status_code=400, detail=str(exc))
         return {"updated": True, "collection": coll}
 
+    @app.get("/api/collections/{collection_id}/sync/progress", dependencies=[Depends(auth)])
+    def collection_sync_progress(collection_id: str):
+        # 首抓/同步实时进度（v0.51）：轻量端点（不扫 kb），前端注册后轮询此端点展示 done/total
+        if orch.sync_engine.get_collection(collection_id) is None:
+            raise HTTPException(status_code=404, detail=f"collection not found: {collection_id}")
+        return {
+            "collection_id": collection_id,
+            "progress": orch.sync_engine.get_progress(collection_id),
+        }
+
     @app.post("/api/collections/{collection_id}/sync", dependencies=[Depends(auth)])
     def sync_collection(collection_id: str):
         if orch.sync_engine.get_collection(collection_id) is None:
