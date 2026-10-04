@@ -142,6 +142,39 @@ def test_register_validation(cfg, guard):
     assert engine.get_collection("test-lib")["name"] == "测试文档站"
 
 
+# ---------- 元数据更新（v0.50 PATCH 通道） ----------
+
+
+def test_update_collection(cfg, guard):
+    engine, _ = make_engine(cfg, guard)
+    engine.register_collection(register_payload())
+
+    # name-only：entry_url 不动
+    coll = engine.update_collection("test-lib", {"name": "新名称"})
+    assert coll["name"] == "新名称"
+    assert coll["entry_url"] == "https://docs.example.com/docs/TestLib/list"
+
+    # entry_url：重算 url_pattern（口径与注册一致），platform 同站不拒绝
+    coll = engine.update_collection("test-lib", {"entry_url": "https://docs.example.com/docs/TestLib/index?lang=zh"})
+    assert coll["entry_url"].endswith("index?lang=zh")
+    assert coll["url_pattern"] == "docs.example.com/docs/TestLib/"
+
+    # 同步状态字段不被破坏
+    assert coll["sync"]["state"] == "registered"
+
+    # 空 name 传入不覆盖既有名称（strip 后为空 = 忽略该字段）
+    coll = engine.update_collection("test-lib", {"name": "", "entry_url": "https://docs.example.com/docs/TestLib/list"})
+    assert coll["name"] == "新名称"
+
+    # 校验：不存在 404 语义 / 空补丁 400 / 平台不一致 400（换平台 = 换 adapter 须重注册）
+    with pytest.raises(SyncError):
+        engine.update_collection("nope", {"name": "x"})
+    with pytest.raises(SyncError):
+        engine.update_collection("test-lib", {})
+    with pytest.raises(SyncError):
+        engine.update_collection("test-lib", {"entry_url": "https://docs.volcengine.com/docs/X/list"})
+
+
 # ---------- 首抓与增量 ----------
 
 

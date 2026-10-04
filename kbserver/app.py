@@ -79,6 +79,12 @@ class ResetRequest(BaseModel):
     backup: bool = False
 
 
+class CollectionPatchRequest(BaseModel):
+    # v0.50 集合元数据更新：name/entry_url 至少一项（§6）
+    name: str | None = None
+    entry_url: str | None = None
+
+
 def create_app(cfg: Config | None = None, orchestrator: Orchestrator | None = None) -> FastAPI:
     cfg = cfg or Config()
     guard = Guard(cfg.kb_root)
@@ -134,6 +140,17 @@ def create_app(cfg: Config | None = None, orchestrator: Orchestrator | None = No
     def list_collections():
         collections = orch.sync_engine.list_collections()
         return {"collections": collections, "total": len(collections)}
+
+    @app.patch("/api/collections/{collection_id}", dependencies=[Depends(auth)])
+    def update_collection(collection_id: str, req: CollectionPatchRequest):
+        # 集合元数据更新（v0.50）：name/entry_url，至少一项；不触发重抓
+        if orch.sync_engine.get_collection(collection_id) is None:
+            raise HTTPException(status_code=404, detail=f"collection not found: {collection_id}")
+        try:
+            coll = orch.sync_engine.update_collection(collection_id, req.model_dump())
+        except SyncError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"updated": True, "collection": coll}
 
     @app.post("/api/collections/{collection_id}/sync", dependencies=[Depends(auth)])
     def sync_collection(collection_id: str):

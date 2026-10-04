@@ -48,6 +48,7 @@ export const api = {
   get: <T>(path: string) => request<T>('GET', path),
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body ?? {}),
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body ?? {}),
+  patch: <T>(path: string, body?: unknown) => request<T>('PATCH', path, body ?? {}),
   delete: <T>(path: string) => request<T>('DELETE', path),
   /** 二进制下载（全文导出 zip / merged）：带 token，错误走同一套 401/409 提示 */
   getBlob: async (path: string): Promise<Blob> => {
@@ -157,13 +158,16 @@ export interface WikiCard {
 }
 
 export interface StatusInfo {
-  inbox: { inbox: number; error: number }
+  // by_entry（v0.46）：按投递通道计数（含 error 项），总览页漏斗细分数据源
+  inbox: { inbox: number; error: number; by_entry?: Record<string, number> }
   archived: number
   errors: { id: string; entry?: string; url?: string; error_stage?: string; error_message?: string }[]
   sources_entries: number
   collections: {
     id: string
     name: string | null
+    /** collection.json 的 entry_url（§4.3）：站点入口，总览集合同步面板外链用（v0.49） */
+    entry_url?: string | null
     state: string | null
     pages: number
     last_synced_at: string | null
@@ -174,6 +178,10 @@ export interface StatusInfo {
     enriched: number
     errors: { id: string; title: string; attempts: number; error_message: string }[]
     last_scan: string | null
+    /** v0.46：与 pending 同源按 platform 分组（含 D 类集合页），总览页漏斗细分数据源 */
+    pending_by_platform?: Record<string, number>
+    /** v0.48：与 pending 同源按来源区域分组（collections=集合镜像页 / sources=单条沉淀） */
+    pending_by_region?: Record<string, number>
   }
   ai_enabled: boolean
   // v0.29 触发门控：manual（默认，只响应手动指令）/ auto（周期扫库）+ 熔断运行态

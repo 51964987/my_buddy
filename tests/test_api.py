@@ -44,9 +44,13 @@ def test_capture_and_status_api(cfg, guard):
         assert resp.status_code == 200
         body = resp.json()
         assert body["accepted"] is True
+        # v0.46 漏斗细分：第二通道投递后 by_entry 按通道分组计数
+        resp2 = client.post("/api/capture", json={"url": "https://example.com/api1b", "title": "t2", "entry": "cli"})
+        assert resp2.status_code == 200
 
         status = client.get("/api/status").json()
-        assert status["inbox"]["inbox"] == 1
+        assert status["inbox"]["inbox"] == 2
+        assert status["inbox"]["by_entry"] == {"browser_ext": 1, "cli": 1}
         assert status["version"]
 
         entries = client.get("/api/entries").json()
@@ -70,6 +74,12 @@ def test_entries_api_after_pipeline(cfg, guard):
         entry = listing["entries"][0]
         assert entry["status"] == "normalized"
         assert entry["platform"] == "web"
+
+        # v0.46/v0.48 漏斗细分：pending_by_platform / pending_by_region 与 pending 同源（同一遍历、覆盖两区）
+        status = client.get("/api/status").json()
+        assert status["enrich"]["pending"] == 1
+        assert status["enrich"]["pending_by_platform"] == {"web": 1}
+        assert status["enrich"]["pending_by_region"] == {"sources": 1}
 
         detail = client.get(f"/api/entries/{entry['id']}").json()
         assert detail["frontmatter"]["id"] == entry["id"]

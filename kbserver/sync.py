@@ -372,6 +372,45 @@ class SyncEngine:
         self._write_json(self._coll_rel(collection_id), collection)
         return collection
 
+    def update_collection(self, collection_id: str, payload: dict) -> dict:
+        """更新集合元数据（§6 v0.50）：name/entry_url 至少一项。
+
+        entry_url 校验同注册并重算 url_pattern；detect_platform 结果与既有 platform
+        不一致 → 拒绝（换平台 = 换 adapter，须重注册）。toc_parser/site 等结构性字段
+        不可改。不触发重抓——同步靠 toc diff，抓取行为由 toc_parser/site 决定。
+        """
+        coll = self.get_collection(collection_id)
+        if coll is None:
+            raise SyncError("config", f"collection not found: {collection_id}")
+
+        name = (payload.get("name") or "").strip()
+        entry_url = (payload.get("entry_url") or "").strip()
+        if not name and not entry_url:
+            raise SyncError("config", "at least one of name/entry_url is required")
+
+        if entry_url:
+            if not entry_url.lower().startswith(("http://", "https://")):
+                raise SyncError("config", "entry_url must start with http:// or https://")
+            from .platforms import detect_platform
+
+            platform, _ = detect_platform(entry_url)
+            if platform != coll.get("platform"):
+                raise SyncError(
+                    "config",
+                    f"entry_url platform mismatch: {platform} != {coll.get('platform')}（换平台须重新注册 collection）",
+                )
+            coll["entry_url"] = entry_url
+            # url_pattern 重算口径与注册一致（§4.3：域名 + 文档库路径前缀）
+            library_code = ((coll.get("site") or {}).get("library_code")) or ""
+            coll["url_pattern"] = (
+                f"{urlsplit(entry_url).hostname}/docs/{library_code}/" if library_code else urlsplit(entry_url).hostname
+            )
+        if name:
+            coll["name"] = name
+
+        self._write_json(self._coll_rel(collection_id), coll)
+        return coll
+
     def get_collection(self, collection_id: str) -> dict | None:
         return self._read_json(self._coll_rel(collection_id))
 

@@ -548,7 +548,8 @@ class Orchestrator:
 
     def status(self) -> dict:
         kb = self.guard.kb_root
-        inbox = {"inbox": 0, "error": 0}
+        # by_entry（v0.46）：按 capture.json entry 通道计数（含 error 项），总览页漏斗细分数据源
+        inbox = {"inbox": 0, "error": 0, "by_entry": {}}
         errors: list[dict] = []
         archived = 0
         root = kb / "inbox"
@@ -569,6 +570,9 @@ class Orchestrator:
                 st = data.get("status")
                 if st in inbox:
                     inbox[st] += 1
+                # 通道分组（v0.46）：未知通道按原值保留，不丢计数
+                entry_ch = data.get("entry") or "unknown"
+                inbox["by_entry"][entry_ch] = inbox["by_entry"].get(entry_ch, 0) + 1
                 if st == "error":
                     errors.append(
                         {
@@ -581,7 +585,16 @@ class Orchestrator:
                     )
         sources_count = len(list((kb / "sources").rglob("note.md"))) if (kb / "sources").exists() else 0
 
-        enrich = {"pending": 0, "enriched": 0, "errors": [], "last_scan": self.last_enrich_scan}
+        # pending_by_platform（v0.46）：与 pending 同一遍遍历按 platform 分组，
+        # 保证总览页漏斗「待整理」站细分口径与站点总数一致（/api/entries 只扫 sources/ 不含 D 类）
+        enrich = {
+            "pending": 0,
+            "enriched": 0,
+            "errors": [],
+            "last_scan": self.last_enrich_scan,
+            "pending_by_platform": {},
+            "pending_by_region": {},
+        }
         for note in self._iter_notes():
             try:
                 fm, _ = split_note(note.read_text(encoding="utf-8"))
@@ -590,6 +603,12 @@ class Orchestrator:
             st = fm.get("status")
             if st == "normalized":
                 enrich["pending"] += 1
+                # platform / region 分组（v0.46/v0.48）：未知值原样保留，不丢计数；
+                # region 区分集合镜像页（collections，去文档树整理）与单条沉淀（sources，时间流可见）
+                plat = fm.get("platform") or "unknown"
+                enrich["pending_by_platform"][plat] = enrich["pending_by_platform"].get(plat, 0) + 1
+                region = note.relative_to(self.guard.kb_root).parts[0]
+                enrich["pending_by_region"][region] = enrich["pending_by_region"].get(region, 0) + 1
             elif st == "enriched":
                 enrich["enriched"] += 1
             elif st == "error":
@@ -614,6 +633,7 @@ class Orchestrator:
                 {
                     "id": coll.get("id"),
                     "name": coll.get("name"),
+                    "entry_url": coll.get("entry_url"),  # v0.49：总览集合同步面板原站外链
                     "state": sync_state.get("state"),
                     "pages": pages,
                     "last_synced_at": sync_state.get("last_synced_at"),
