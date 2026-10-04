@@ -135,8 +135,11 @@ def test_image_localization(cfg, guard):
     raw_files = []
     out = _localize_images(md, "sources/web/2026/x", guard, fetcher, 30, raw_files)
     assert out.startswith("![alt](raw/img-")
-    assert raw_files and raw_files[0].startswith("raw/img-")
-    img_path = guard.kb_root.joinpath("sources/web/2026/x", *raw_files[0].split("/"))
+    # v0.32：图片条目为 {path, src}（原站 URL 映射）
+    assert raw_files and isinstance(raw_files[0], dict)
+    assert raw_files[0]["src"] == "https://img.example.com/pic.png"
+    assert raw_files[0]["path"].startswith("raw/img-")
+    img_path = guard.kb_root.joinpath("sources/web/2026/x", *raw_files[0]["path"].split("/"))
     assert img_path.exists()
 
 
@@ -198,3 +201,100 @@ def test_fetch_fail_fallback_then_full_recover(cfg, guard):
     assert meta["extraction"] == "full"
     assert meta["raw_files"] == ["raw/page.html"]
     assert "first paragraph" in (entry_dir / "note.md").read_text("utf-8")
+
+RENDERED_HTML = """<html><head><title>rendered spa</title></head><body>
+<article><h1>rendered spa</h1>
+<p>dynamic rendered body content for playwright fallback.</p>
+</article></body></html>"""
+
+
+def _pw_fetcher(pages=None, fail=False):
+    """可注入的假 Playwright 抓取器：记录调用，返回渲染后页面或抛错。"""
+    calls = {"n": 0}
+
+    def fetch(url: str, timeout: float = 15.0):
+        calls["n"] += 1
+        if fail:
+            raise RuntimeError("playwright fetch failed: TimeoutError: goto")
+        content = (pages or {}).get(url) or RENDERED_HTML
+        from kbserver.normalize import FetchResult
+
+        return FetchResult(
+            url=url, final_url=url, content=content.encode("utf-8"),
+            encoding="utf-8", status_code=200, content_type="text/html",
+        )
+
+    fetch.calls = calls
+    return fetch
+
+
+def test_playwright_fallback_recovers_fetch_failure(cfg, guard):
+    """抓取失败 + 无选中文本 → Playwright 兜底渲染成功 → 完整落盘（meta.fetch.via=playwright）。"""
+    cfg.data["normalize"]["playwright_fallback"] = True
+    pw = _pw_fetcher()
+    orch = Orchestrator(cfg, guard, fetcher=make_fetcher(fail_urls={"https://example.com/dyn"}), playwright_fetcher=pw)
+    r = _capture(guard, "https://example.com/dyn")
+    summary = orch.scan_once()
+    assert summary["normalized"] == 1
+    assert pw.calls["n"] == 1
+    entry_dir = guard.kb_root.joinpath(*f"sources/web/2026/{r['entry_id']}".split("/"))
+    note = (entry_dir / "note.md").read_text("utf-8")
+    assert "dynamic rendered body content" in note
+    meta = json.loads((entry_dir / "meta.json").read_text("utf-8"))
+    assert meta["fetch"]["via"] == "playwright"
+    assert meta["raw_files"] == ["raw/page.html"]  # raw 升级为渲染后页面
+
+
+def test_playwright_fallback_on_empty_extract(cfg, guard):
+    """SPA 空壳提取为空 + 无选中文本 → Playwright 兜底重提取。"""
+    cfg.data["normalize"]["playwright_fallback"] = True
+    pw = _pw_fetcher()
+    orch = Orchestrator(cfg, guard, fetcher=make_fetcher(pages={"https://example.com/spa3": SPA_HTML}), playwright_fetcher=pw)
+    r = _capture(guard, "https://example.com/spa3")
+    summary = orch.scan_once()
+    assert summary["normalized"] == 1
+    meta = json.loads(
+        guard.kb_root.joinpath(*f"sources/web/2026/{r['entry_id']}/meta.json".split("/")).read_text("utf-8")
+    )
+    assert meta["fetch"]["via"] == "playwright"
+    assert meta["extraction"] == "full"
+
+
+def test_playwright_failure_stays_error_with_stage(cfg, guard):
+    """兜底仍失败 → 按原失败阶段转 error，error_message 含 playwright 标记（可观测可重跑）。"""
+    cfg.data["normalize"]["playwright_fallback"] = True
+    pw = _pw_fetcher(fail=True)
+    orch = Orchestrator(cfg, guard, fetcher=make_fetcher(fail_urls={"https://example.com/down2"}), playwright_fetcher=pw)
+    r = _capture(guard, "https://example.com/down2")
+    for _ in range(3):
+        orch.scan_once()
+    data = _capture_json(guard, r["entry_id"])
+    assert data["status"] == "error"
+    assert data["error_stage"] == "fetch"
+    assert "playwright" in data["error_message"]
+
+
+def test_playwright_not_attempted_with_selection(cfg, guard):
+    """带选中文本走既有降级策略，不触发 Playwright（§11.4 归一化引擎职责卡口径）。"""
+    cfg.data["normalize"]["playwright_fallback"] = True
+    pw = _pw_fetcher()
+    orch = Orchestrator(cfg, guard, fetcher=make_fetcher(fail_urls={"https://example.com/off"}), playwright_fetcher=pw)
+    r = _capture(guard, "https://example.com/off", text="offline selection")
+    orch.scan_once()
+    assert pw.calls["n"] == 0
+    entry_dir = guard.kb_root.joinpath(*f"sources/web/2026/{r['entry_id']}".split("/"))
+    meta = json.loads((entry_dir / "meta.json").read_text("utf-8"))
+    assert meta["extraction"] == "selection_fallback"
+
+
+def test_playwright_fallback_disabled_no_pw_call(cfg, guard):
+    """开关关闭：兜底不触发，直连失败照旧转 fetch error。"""
+    pw = _pw_fetcher()
+    orch = Orchestrator(cfg, guard, fetcher=make_fetcher(fail_urls={"https://example.com/nopw"}), playwright_fetcher=pw)
+    r = _capture(guard, "https://example.com/nopw")
+    for _ in range(3):
+        orch.scan_once()
+    assert pw.calls["n"] == 0
+    data = _capture_json(guard, r["entry_id"])
+    assert data["status"] == "error"
+    assert data["error_stage"] == "fetch"

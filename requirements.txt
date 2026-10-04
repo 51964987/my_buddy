@@ -7,4 +7,6 @@ beautifulsoup4>=4.12
 PyYAML>=6.0
 pydantic>=2.7
 jieba==0.42.1
+sqlite-vec==0.1.9
+playwright>=1.40
 pytest>=8.0

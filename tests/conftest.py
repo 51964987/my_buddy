@@ -47,6 +47,10 @@ def cfg(tmp_path):
     c = Config(path=tmp_path / "kbserver.config.json")
     c.data["kb_root"] = str(tmp_path / "kb")
     c.data["pipeline"]["worker_enabled"] = False
+    # 测试默认关闭 Playwright 兜底：假 fetcher 失败后真浏览器会抓到真实页面，破坏确定性；
+    # 兜底行为由注入 playwright_fetcher 的专项用例覆盖
+    c.data["normalize"]["playwright_fallback"] = False
+    c.data["index"]["vector_enabled"] = False
     return c
 
 

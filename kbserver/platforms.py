@@ -25,3 +25,13 @@ def detect_platform(url: str) -> tuple[str, str]:
         if rx.search(host):
             return platform, source_type
     return "web", "social"
+
+
+def source_type_options() -> list[str]:
+    """source_type 固定枚举（§4.2）：前端过滤器选项来源（UI 规则：禁止前端硬编码）。"""
+    return sorted({source_type for _rx, _platform, source_type in _RULES_COMPILED})
+
+
+def platform_options() -> list[str]:
+    """platform 注册表值（开放枚举，§4.2）：新增平台 = 注册新值。"""
+    return sorted({platform for _rx, platform, _st in _RULES_COMPILED})

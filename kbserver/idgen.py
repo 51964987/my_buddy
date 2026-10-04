@@ -46,3 +46,12 @@ def url_to_id(url: str) -> str:
 def text_entry_id() -> str:
     ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     return f"t{ts}-{secrets.token_hex(3)}"
+
+
+def collection_page_id(collection_id: str, site_path: str) -> str:
+    """D 类页面 id（§9 决策 1）：SHA-1(collection-id + 站内路径) 前 12 位。
+
+    站内路径取 CanonicalURL 路径（文档站页面 URL 查询参数不稳定，不入哈希），
+    跨同步稳定不变；同页面重复同步天然幂等。
+    """
+    return hashlib.sha1(f"{collection_id}:{site_path}".encode("utf-8")).hexdigest()[:ID_LENGTH]

@@ -3,6 +3,16 @@
 区域白名单 + 路径校验 + 原子写（tmp + rename）；越界拒绝并计数。
 enrich 阶段字段级白名单：对源条目 frontmatter 只允许补丁式更新
 （patch 键必须 ⊆ 调用方显式声明的 field_whitelist），见 patch_note_fields。
+
+区域白名单按**操作分域**（§4.4 v0.34 实施口径）——两张表：
+- `STAGE_REGIONS`：普通写（新建/覆盖、字段级补丁、meta.json 写）；
+- `STAGE_DESTRUCTIVE_REGIONS`：破坏性写（物理删除、整树移动），**不含
+  `collections/`**——D 类是源站镜像，可写不可删（v0.20 拍板），打回重生成
+  （复位源条目 status）走普通写通道，物理删除仍被挡住。
+
+v0.16 引入 D 类页时只给 normalize 放行了 collections/，enrich 未同步，导致
+D 类页整理必然 500（回写被拒 → 失败流水又要写同一路径 → 冒泡）。新增区域时
+必须核对"该 stage 的合法目标集"，两表都要看。
 """
 
 from __future__ import annotations
@@ -11,6 +21,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -27,9 +38,21 @@ REGION_WIKI = "wiki"
 STAGE_REGIONS: dict[str, set[str]] = {
     "capture": {REGION_INBOX},
     "normalize": {REGION_SOURCES, REGION_COLLECTIONS, REGION_INBOX},
-    "enrich": {REGION_WIKI, REGION_SOURCES},
+    # 源条目含 A/B/C 类（sources/）与 D 类（collections/<id>/docs/**），
+    # 两者都是 enrich 的合法目标（§5.1「D 类变更页同流程」）
+    "enrich": {REGION_WIKI, REGION_SOURCES, REGION_COLLECTIONS},
     "sync": {REGION_COLLECTIONS},
     "index": {"index.db"},
+    # 人工处置通道（§4.4 v0.17）：审核台三处置（晋升/打回/删除）经 API 走守卫；
+    # v0.21 扩展至 inbox（丢弃通道：DELETE /api/inbox/{id} 物理删除废投递）；
+    # v0.34 扩展至 collections —— 打回要复位 D 类源条目（字段级补丁 + meta.json）
+    "curation": {REGION_WIKI, REGION_SOURCES, REGION_INBOX, REGION_COLLECTIONS},
+}
+
+# 破坏性操作（物理删除/整树移动）的收窄白名单：未列出的 stage 一律沿用
+# STAGE_REGIONS。collections 缺席即"镜像只可写不可删"（§4.4 v0.20 + v0.34）。
+STAGE_DESTRUCTIVE_REGIONS: dict[str, set[str]] = {
+    "curation": {REGION_WIKI, REGION_SOURCES, REGION_INBOX},
 }
 
 
@@ -43,7 +66,21 @@ def atomic_write(path: Path, data: bytes) -> Path:
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        os.replace(tmp, path)
+        try:
+            os.replace(tmp, path)
+        except PermissionError:
+            # Windows 偶发竞态（目标平台，§平台约束）：杀软/索引服务短暂锁定刚创建的
+            # tmp 文件，os.replace 报 WinError 5 拒绝访问。有界重试吸收瞬时锁；
+            # 持续失败仍抛出（真实占用不可掩盖）。
+            for _ in range(4):
+                time.sleep(0.05)
+                try:
+                    os.replace(tmp, path)
+                    break
+                except PermissionError:
+                    continue
+            else:
+                raise
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -55,16 +92,18 @@ class Guard:
         self.kb_root = Path(kb_root)
         self.violations: Counter[str] = Counter()
 
-    def _check(self, stage: str, rel: str) -> Path:
-        allowed = STAGE_REGIONS.get(stage)
-        if not allowed:
+    def _check(self, stage: str, rel: str, *, destructive: bool = False) -> Path:
+        regions = STAGE_REGIONS.get(stage)
+        if not regions:
             self._reject(stage, rel, f"unknown stage '{stage}'")
             raise AssertionError
+        if destructive:
+            regions = STAGE_DESTRUCTIVE_REGIONS.get(stage, regions)
         p = Path(rel.replace("\\", "/"))
         if not p.parts or p.is_absolute() or ".." in p.parts or p.parts[0].startswith("_skip"):
             self._reject(stage, rel, "invalid relative path")
             raise AssertionError
-        if p.parts[0] not in allowed:
+        if p.parts[0] not in regions:
             self._reject(stage, rel, f"region '{p.parts[0]}' not allowed for stage '{stage}'")
             raise AssertionError
         return self.kb_root.joinpath(*p.parts)
@@ -112,14 +151,25 @@ class Guard:
         return self.kb_root.joinpath(*Path(rel.replace("\\", "/")).parts).exists()
 
     def move_tree(self, stage: str, src_rel: str, dst_rel: str) -> None:
-        src = self._check(stage, src_rel)
-        dst = self._check(stage, dst_rel)
+        src = self._check(stage, src_rel, destructive=True)
+        dst = self._check(stage, dst_rel, destructive=True)
         if not src.exists():
             return
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dst))
 
     def remove_tree(self, stage: str, rel: str) -> None:
-        path = self._check(stage, rel)
+        path = self._check(stage, rel, destructive=True)
         if path.exists():
             shutil.rmtree(path)
+
+    def remove_path(self, stage: str, rel: str) -> None:
+        """删除文件或目录（curation 处置用：wiki 卡是单文件，条目目录是树）。
+
+        走破坏性通道（§4.4 v0.34）：`collections/` 不在白名单，镜像页删不掉。
+        """
+        path = self._check(stage, rel, destructive=True)
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()

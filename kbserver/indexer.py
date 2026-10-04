@@ -21,6 +21,7 @@ token 内 `"` 转义为 `""`（用户关键词含 `"` `(` `)` `^` `-` 及 AND/OR
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 import time
@@ -29,6 +30,9 @@ from pathlib import Path
 
 from .frontmatter import split_note
 from .guard import Guard
+from .llm import LLMError, embed_client_for_task
+
+logger = logging.getLogger(__name__)
 
 # 语料文本入索引库的截断上限（控制 index.db 体积；仅影响摘要定位与索引体积）
 MAX_RAW_CHARS = 20000
@@ -38,6 +42,14 @@ SYNC_TTL = 5.0
 
 # 纯符号 / 空白 token 过滤（segment 产物为空时不拼 MATCH）
 _PURE_PUNCT_RE = re.compile(r"^[\W_]+$", re.UNICODE)
+
+# 向量增强（§5.1 v0.17）：embedding 输入截断与分批大小
+EMBED_MAX_CHARS = 4000
+EMBED_BATCH = 16
+
+
+class SemanticSearchError(Exception):
+    """语义检索不可用（未启用 / 配置漂移 / embedding 调用失败），由 API 层转 409。"""
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS docs(
@@ -95,6 +107,19 @@ def build_match_query(tokens: list[str]) -> str:
     return " ".join('"' + t.replace('"', '""') + '"' for t in tokens)
 
 
+def load_vec_module():
+    """取 sqlite_vec 模块（可选依赖）；未安装返回 None，由调用方按各自口径处理。
+
+    v0.36：此前 `from sqlite_vec import serialize_float32` 是函数内裸导入，缺装时
+    语义检索抛 ImportError 变成无信息 500；现语义检索转 409、向量同步转 error 状态。
+    """
+    try:
+        import sqlite_vec
+    except ImportError:
+        return None
+    return sqlite_vec
+
+
 def _first_heading(body: str) -> str:
     """从正文提取首个一级标题作为无 title 元数据的文档标题（wiki 卡题目在正文里）。"""
     for line in body.splitlines():
@@ -111,6 +136,10 @@ class Indexer:
         # index 阶段授权区域即 index.db：路径解析经守卫（越界会拒绝并计数）
         self.db_path: Path = guard.resolve("index", "index.db")
         self._last_sync: float = 0.0
+        # 向量增强状态（§5.1 v0.17）：disabled / pending / ready / mismatch / error
+        self.vector_enabled = bool(cfg.data.get("index", {}).get("vector_enabled", False))
+        self.vector_state = "ready" if self.vector_enabled else "disabled"
+        self.vector_error: str | None = None
 
     # ---------- 语料扫描 ----------
 
@@ -184,7 +213,20 @@ class Indexer:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.executescript(_SCHEMA)
+        self._load_vec(conn)
         return conn
+
+    @staticmethod
+    def _load_vec(conn: sqlite3.Connection) -> None:
+        """挂载 sqlite-vec 扩展（向量增强）；未安装时静默跳过——FTS 全文检索不受影响。"""
+        try:
+            import sqlite_vec
+
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+        except (ImportError, AttributeError):
+            pass
 
     def _meta_get(self, conn: sqlite3.Connection, key: str) -> str | None:
         row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
@@ -230,9 +272,17 @@ class Indexer:
         summary = {"added": 0, "updated": 0, "removed": 0, "total": 0}
         corpus = {rel: doc for rel, doc in self._iter_corpus()}
         with closing(self._connect()) as conn:
-            # 分词/语料口径不一致 → 先整库重建（迁移自 txxy_test 修订 14 同机理，防混存）
+            # 分词/语料口径不一致 → 先整库重建（迁移自 txxy_test 修订 14 同机理，防混存）；
+            # 分词口径重建 = 全量换语料，向量表随之作废（清 embed_id 强制下次重嵌）
             if self._meta_get(conn, "segmenter_id") != _segmenter_id():
-                return self._rebuild_in(conn, corpus, reason="segmenter_mismatch")
+                result = self._rebuild_in(conn, corpus, reason="segmenter_mismatch")
+                self._load_vec(conn)
+                conn.execute("DELETE FROM meta WHERE key = 'embed_id'")
+                conn.executescript("DROP TABLE IF EXISTS vec; DROP TABLE IF EXISTS vec_docs;")
+                conn.commit()
+                self._last_sync = time.monotonic()
+                self._sync_vectors(corpus)
+                return result
             known = {
                 row[0]: (row[1], row[2], row[3])
                 for row in conn.execute("SELECT rel, kind, mtime_ns, size FROM docs")
@@ -256,6 +306,7 @@ class Indexer:
             summary["total"] = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
             conn.commit()  # 增量 diff 事务提交（closing 只关连接不提交，勿依赖隐式提交）
         self._last_sync = time.monotonic()
+        self._sync_vectors(corpus)
         return summary
 
     def _rebuild_in(self, conn: sqlite3.Connection, corpus: dict[str, dict], reason: str) -> dict:
@@ -275,24 +326,223 @@ class Indexer:
         return {"rebuilt": True, "reason": reason, "added": len(corpus), "total": len(corpus)}
 
     def rebuild(self) -> dict:
-        """全量重建指令（§5.3：索引可随时删除重建；手工删除 index.db 后调用同样成立）。"""
+        """全量重建指令（§5.3：索引可随时删除重建；手工删除 index.db 后调用同样成立）。
+
+        向量增强开启时同步重建向量表（清除 embed_id 口径标识，强制全量重嵌）。
+        """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         corpus = {rel: doc for rel, doc in self._iter_corpus()}
         with closing(self._connect()) as conn:
             result = self._rebuild_in(conn, corpus, reason="manual")
             result.pop("added", None)
             result["docs"] = result.pop("total")
+            # 向量表随全量重建一并重建：清口径标识后按当前配置重嵌
+            self._load_vec(conn)
+            conn.execute("DELETE FROM meta WHERE key = 'embed_id'")
+            conn.executescript("DROP TABLE IF EXISTS vec; DROP TABLE IF EXISTS vec_docs;")
+            conn.commit()
+        self._sync_vectors(corpus)
         return result
 
+    # ---------- 向量增强（§5.1 v0.17 实施口径） ----------
+
+    def _sync_vectors(self, corpus: dict[str, dict]) -> None:
+        """向量表懒同步：与 FTS 同语料同 diff 口径（rel + mtime_ns + size）。
+
+        任何失败只降级向量状态（error/mismatch），绝不影响 FTS 全文检索；
+        embedding 口径（model+dimensions）变化 → mismatch，拒绝语义检索、
+        由人工经 POST /api/index/rebuild 重建（不自动重嵌，避免静默外部费用）。
+        """
+        if not self.vector_enabled:
+            self.vector_state = "disabled"
+            return
+        try:
+            self._sync_vectors_inner(corpus)
+        except Exception as exc:  # 兜底：向量同步任何异常都不得拖垮 FTS 检索
+            self.vector_state = "error"
+            self.vector_error = f"{type(exc).__name__}: {exc}"
+
+    def _sync_vectors_inner(self, corpus: dict[str, dict]) -> None:
+        vec_module = load_vec_module()
+        if vec_module is None:
+            # 可选依赖缺装：向量状态显式报出（语义检索据此 409），全文检索不受影响
+            self.vector_state = "error"
+            self.vector_error = "sqlite-vec not installed (pip install sqlite-vec)"
+            return
+        serialize_float32 = vec_module.serialize_float32
+
+        ai_cfg = self.cfg.data.get("ai", {})
+        try:
+            client = embed_client_for_task(ai_cfg)
+        except LLMError as exc:
+            self.vector_state = "error"
+            self.vector_error = str(exc)
+            return
+        dims = client.dimensions
+        if not dims:
+            self.vector_state = "error"
+            self.vector_error = "ai.tasks.embedding.dimensions is not configured"
+            return
+        embed_id = f"{client.model}:{dims}"
+        with closing(self._connect()) as conn:
+            cur = self._meta_get(conn, "embed_id")
+            if cur and cur != embed_id:
+                # 口径漂移：拒绝语义检索并提示人工重建（保留旧向量，不自动重嵌）
+                self.vector_state = "mismatch"
+                self.vector_error = f"embedding config changed ({cur} -> {embed_id}); rebuild via POST /api/index/rebuild"
+                return
+            if not cur:
+                # 首次启用：清空可能残留的旧维度表后登记口径
+                conn.executescript("DROP TABLE IF EXISTS vec; DROP TABLE IF EXISTS vec_docs;")
+                self._meta_set(conn, "embed_id", embed_id)
+                conn.commit()
+            conn.executescript(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS vec USING vec0(embedding float[{dims}]);"
+                "CREATE TABLE IF NOT EXISTS vec_docs("
+                "rel TEXT PRIMARY KEY, mtime_ns INTEGER, size INTEGER, vec_rowid INTEGER);"
+            )
+            known = {
+                row[0]: (row[1], row[2], row[3])
+                for row in conn.execute("SELECT rel, mtime_ns, size, vec_rowid FROM vec_docs")
+            }
+            removed = [rel for rel in known if rel not in corpus]
+            for rel in removed:
+                conn.execute("DELETE FROM vec WHERE rowid = ?", (known[rel][2],))
+                conn.execute("DELETE FROM vec_docs WHERE rel = ?", (rel,))
+            pending: list[tuple[str, dict, object]] = []
+            for rel, doc in corpus.items():
+                path = self.guard.kb_root.joinpath(*rel.split("/"))
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                old = known.get(rel)
+                if old and old[0] == stat.st_mtime_ns and old[1] == stat.st_size:
+                    continue
+                pending.append((rel, doc, stat))
+            for i in range(0, len(pending), EMBED_BATCH):
+                chunk = pending[i : i + EMBED_BATCH]
+                texts = [self._embed_text(doc) for _, doc, _ in chunk]
+                vecs = client.embed(texts)
+                for (rel, _doc, stat), vec in zip(chunk, vecs):
+                    old_rowid = known.get(rel, (None, None, None))[2]
+                    if old_rowid is not None:
+                        conn.execute("DELETE FROM vec WHERE rowid = ?", (old_rowid,))
+                    ins = conn.execute(
+                        "INSERT INTO vec(embedding) VALUES (?)", (serialize_float32(vec),)
+                    )
+                    conn.execute(
+                        "INSERT OR REPLACE INTO vec_docs(rel, mtime_ns, size, vec_rowid)"
+                        " VALUES (?, ?, ?, ?)",
+                        (rel, stat.st_mtime_ns, stat.st_size, ins.lastrowid),
+                    )
+            conn.commit()
+        self.vector_state = "ready"
+        self.vector_error = None
+
+    @staticmethod
+    def _embed_text(doc: dict) -> str:
+        """embedding 输入：与 FTS 分词输入同源（标题+tags+正文），另做长度截断控成本。"""
+        return f"{doc['title']}\n{doc['tags']}\n{doc['text_raw'][:EMBED_MAX_CHARS]}"
+
+    def search_semantic(self, q: str, limit: int = 20) -> dict:
+        """语义检索（GET /api/search?mode=semantic）：KNN 最近邻，显式 k（txxy 踩坑口径）。"""
+        if not self.vector_enabled:
+            raise SemanticSearchError("vector index is disabled (config index.vector_enabled)")
+        vec_module = load_vec_module()
+        if vec_module is None:
+            # 可选依赖缺装 → 与「未启用/口径漂移」同一出口（API 层 409），不裸 500
+            raise SemanticSearchError("sqlite-vec not installed (pip install sqlite-vec); full-text search unaffected")
+        serialize_float32 = vec_module.serialize_float32
+        if self.vector_state == "mismatch":
+            raise SemanticSearchError(self.vector_error or "embedding mismatch; rebuild index")
+
+        self.ensure_fresh()  # 懒同步可能更新 vector_state
+        if self.vector_state == "mismatch":
+            raise SemanticSearchError(self.vector_error or "embedding mismatch; rebuild index")
+        if self.vector_state == "error":
+            raise SemanticSearchError(f"embedding unavailable: {self.vector_error}")
+        ai_cfg = self.cfg.data.get("ai", {})
+        try:
+            client = embed_client_for_task(ai_cfg)
+            qvec = client.embed([q.strip()[:EMBED_MAX_CHARS]])[0]
+        except LLMError as exc:
+            raise SemanticSearchError(f"query embedding failed: {exc}") from exc
+        with closing(self._connect()) as conn:
+            # vec0 KNN 返回 rowid + distance（0.1.x 无元数据列）；rel 经 vec_docs 映射
+            rows = conn.execute(
+                "SELECT rowid, distance FROM vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                (serialize_float32(qvec), int(limit)),
+            ).fetchall()
+            results = []
+            for vec_rowid, dist in rows:
+                rel_row = conn.execute(
+                    "SELECT rel FROM vec_docs WHERE vec_rowid = ?", (vec_rowid,)
+                ).fetchone()
+                if rel_row is None:
+                    continue
+                rel = rel_row[0]
+                row = conn.execute(
+                    "SELECT kind, entry_id, title, url, date, tags, status, text_raw"
+                    " FROM fts WHERE rel = ?",
+                    (rel,),
+                ).fetchone()
+                if row is None:
+                    continue  # FTS 与向量偶发不同步（如语料正被编辑），跳过该行
+                kind, entry_id, title, url, date, tags, status, text_raw = row
+                results.append(
+                    {
+                        "rel": rel,
+                        "kind": kind,
+                        "entry_id": entry_id,
+                        "title": title,
+                        "url": url,
+                        "date": date,
+                        "tags": tags.split() if tags else [],
+                        "status": status,
+                        "snippet": self._snippet(text_raw or "", []),
+                        "distance": round(float(dist), 4),
+                    }
+                )
+        return {"query": q, "mode": "semantic", "results": results, "total": len(results)}
+
+    def index_status(self) -> dict:
+        """索引概览（运维/总览页）：不触发同步，只读计数。"""
+        docs = 0
+        embedded = 0
+        if self.db_path.exists():
+            try:
+                with closing(self._connect()) as conn:
+                    docs = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+                    try:
+                        embedded = conn.execute("SELECT COUNT(*) FROM vec_docs").fetchone()[0]
+                    except sqlite3.OperationalError:
+                        embedded = 0  # 向量表未建（未启用/未同步）
+            except sqlite3.Error as exc:  # 含 DatabaseError（库损坏/磁盘错误），静默会误报"0 篇"
+                logger.warning("读取索引状态失败（docs 显示为 0，POST /api/index/rebuild 可修复）：%s: %s", type(exc).__name__, exc)
+        return {
+            "docs": docs,
+            "vector": {
+                "enabled": self.vector_enabled,
+                "state": self.vector_state,
+                "embedded": embedded,
+                "error": self.vector_error,
+            },
+        }
+
     def ensure_fresh(self, ttl: float = SYNC_TTL) -> None:
-        """查询前懒同步：TTL 限频，窗口内不重复扫盘。"""
+        """查询前懒同步：TTL 限频，窗口内不重复扫盘。
+
+        索引库异常（占用/损坏/磁盘错误）不阻塞检索旧数据，但必须留日志——
+        v0.36：此前只捕 `sqlite3.OperationalError`，漏了父类 `DatabaseError`
+        （如 malformed 库），异常穿透成无信息 500。
+        """
         if self._last_sync and (time.monotonic() - self._last_sync) < ttl:
             return
         try:
             self.sync()
-        except sqlite3.OperationalError:
-            # 库文件被占用/损坏不阻塞检索旧数据；重建指令可修复
-            pass
+        except sqlite3.Error as exc:
+            logger.warning("索引懒同步失败（本次检索使用现有索引，POST /api/index/rebuild 可修复）：%s: %s", type(exc).__name__, exc)
 
     # ---------- 检索 ----------
 
