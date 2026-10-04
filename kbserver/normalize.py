@@ -175,6 +175,71 @@ def _absolutize_links(markdown: str, base_url: str) -> str:
     return _LINK_RE.sub(repl, markdown)
 
 
+_SHELL_TEXT_THRESHOLD = 200  # 剥脚本后可见文本低于该值 → 视为 SPA 空壳/无内容页（§5.1 v0.43）
+
+
+def _looks_like_shell(html: str) -> bool:
+    """SPA 空壳检测：去掉 script/style/noscript 后可见文本极少即为空壳。
+
+    典型如火山引擎文档站：保存的 11.9KB 字节里正文为零，仅 noscript 一句提示。
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup.find_all(("script", "style", "noscript")):
+        tag.decompose()
+    return len(soup.get_text(strip=True)) < _SHELL_TEXT_THRESHOLD
+
+
+def _build_view_snapshot(html: str, base_url: str) -> str:
+    """构造可浏览快照（§5.1 v0.43）：剥脚本 + 注入 <base> + 统一 utf-8。
+
+    剥掉脚本后，SPA 在本地（file://）打开不再被脚本重渲染成"页面无法访问"
+    假 404，直接呈现保存时的 DOM；<base> 指向原站，联网打开时 CSS/图片按
+    原站地址加载，观感接近原页。
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup.find_all(("script", "noscript")):
+        tag.decompose()
+    head = soup.head
+    if head is None:
+        head = soup.new_tag("head")
+        if soup.html is not None:
+            soup.html.insert(0, head)
+        else:
+            soup.insert(0, head)
+    for tag in head.find_all("base"):
+        tag.decompose()
+    head.insert(0, soup.new_tag("meta", charset="utf-8"))
+    if base_url:
+        head.insert(0, soup.new_tag("base", href=base_url))
+    return str(soup)
+
+
+def _view_snapshot_html(
+    html_bytes: bytes,
+    fr: "FetchResult | None",
+    fetch_via: str,
+    ncfg: dict,
+    playwright_fetcher: FetchFn | None,
+    url: str,
+) -> str | None:
+    """按 §5.1 v0.43 口径生成可浏览快照 HTML；静态正文页返回 None（无需快照）。"""
+    html = html_bytes.decode((fr.encoding if fr else None) or "utf-8", errors="replace")
+    shell = _looks_like_shell(html)
+    if fetch_via != "playwright" and not shell:
+        return None
+    source = html
+    # 渲染态 DOM（via=playwright）已是真实渲染结果，不再重渲染；
+    # 空壳且兜底开启时渲染一次取真实 DOM（仅用于快照，不改变正文提取策略）
+    if shell and fetch_via != "playwright" and ncfg.get("playwright_fallback", True):
+        try:
+            pw = playwright_fetcher or playwright_fetch
+            source = pw(url, timeout=float(ncfg.get("playwright_timeout", 15.0))).text
+        except Exception:
+            source = html  # 渲染失败降级：至少剥掉脚本，不再被脚本重渲染成错误页
+    base_url = (fr.final_url if fr else None) or url
+    return _build_view_snapshot(source, base_url)
+
+
 def _localize_images(
     markdown: str,
     entry_rel: str,
@@ -340,6 +405,13 @@ def normalize_entry(
     if html_bytes is not None:
         guard.write_bytes("normalize", f"{entry_rel}/raw/page.html", html_bytes)
         raw_files.append("raw/page.html")
+        # 可浏览快照（§5.1 v0.43）：原件字节不变，旁路生成剥脚本快照供本地双击查看
+        view_html = _view_snapshot_html(html_bytes, fr, fetch_via, ncfg, playwright_fetcher, url)
+        if view_html is not None:
+            guard.write_bytes(
+                "normalize", f"{entry_rel}/raw/page.view.html", view_html.encode("utf-8")
+            )
+            raw_files.append("raw/page.view.html")
 
     screenshot = payload.get("screenshot_b64")
     if screenshot:

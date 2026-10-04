@@ -6,6 +6,7 @@ import uvicorn
 
 from .app import create_app
 from .config import Config, check_listen_security
+from .logsetup import build_log_config
 
 
 def main() -> None:
@@ -19,7 +20,7 @@ def main() -> None:
         app,
         host=str(cfg.data.get("host", "127.0.0.1")),
         port=int(cfg.data.get("port", 8765)),
-        log_level="info",
+        log_config=build_log_config(cfg.path),
     )
 
 

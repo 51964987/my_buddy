@@ -64,6 +64,8 @@ python -m pytest                       # 运行测试
 
 配置文件 `kbserver.config.json`（首次运行后可手工创建/经 API 修改）：`kb_root` / `host` / `port` / `token`（设置后所有 API 需带 `X-KB-Token` 头）。
 
+服务日志（v0.42）：统一落在配置文件同目录 `logs/kbserver.log`（单文件 5MB 滚动、保留 3 份），控制台同步输出；后台启动时排障直接看该文件。
+
 ## AI 整理（P3）
 
 默认关闭。默认 provider 为 **Ollama 本地**（v0.18：`tags`/`summary_card` 指向 `http://127.0.0.1:11434/v1` + `qwen2.5:1.5b`，原生 `/api/chat` + `think:false`，零凭据零成本；GLM 预设保留，`embedding` 默认 glm）。启用步骤（§9 决策 4：provider 表 + 任务分级 + api_key env-only）：

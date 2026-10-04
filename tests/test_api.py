@@ -74,7 +74,8 @@ def test_entries_api_after_pipeline(cfg, guard):
         detail = client.get(f"/api/entries/{entry['id']}").json()
         assert detail["frontmatter"]["id"] == entry["id"]
         assert "first paragraph" in detail["body"]
-        assert detail["meta"]["raw_files"] == ["raw/page.html"]
+        # SAMPLE_HTML 低于空壳阈值 → 快照旁路生成（v0.43）
+        assert detail["meta"]["raw_files"] == ["raw/page.html", "raw/page.view.html"]
         assert "raw/page.html" in detail["raw_files"]
 
         assert client.get("/api/entries/missing").status_code == 404

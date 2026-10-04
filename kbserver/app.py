@@ -30,8 +30,9 @@ from .config import Config
 from .deps import check_dependencies
 from .enrich import EnrichError, EntryNotFound, EntryStateError
 from .frontmatter import split_note
-from .guard import Guard
+from .guard import Guard, WriteBoundaryError
 from .indexer import Indexer, SemanticSearchError
+from .maintenance import reset_regions
 from .orchestrator import Orchestrator
 from .platforms import platform_options, source_type_options
 from .sync import SyncError, list_parsers, probe_site
@@ -70,6 +71,12 @@ class CollectionRequest(BaseModel):
     toc_parser: str = "volcengine"
     library_code: str | None = None
     lang: str = "zh"
+
+
+class ResetRequest(BaseModel):
+    regions: list[str]
+    confirm: str
+    backup: bool = False
 
 
 def create_app(cfg: Config | None = None, orchestrator: Orchestrator | None = None) -> FastAPI:
@@ -231,6 +238,36 @@ def create_app(cfg: Config | None = None, orchestrator: Orchestrator | None = No
             raise HTTPException(status_code=404, detail=f"inbox entry not found: {entry_id}")
         guard.remove_tree("curation", rel)
         return {"deleted": True, "entry_id": entry_id}
+
+    @app.post("/api/kb/reset", dependencies=[Depends(auth)])
+    def kb_reset(req: ResetRequest):
+        """库分区重置（§4.4 v0.44）：物理删除指定分区并重建空目录。
+
+        regions 为四区非空子集且不允许全选（全量重置含 index.db，进程内被
+        SQLite 连接持有无法删除，由 scripts/reset_kb.ps1 承担）；confirm 必须
+        为 "RESET" 显式确认；backup=true 重置前整库备份（排除 index.db）。
+        index.db 不删：懒同步 removed 通道自动对齐（铁律 1）。
+        """
+        regions = sorted(set(req.regions))
+        invalid = [r for r in regions if r not in KB_REGIONS]
+        if invalid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown region(s): {', '.join(invalid)}. valid: {'/'.join(KB_REGIONS)}",
+            )
+        if not regions:
+            raise HTTPException(status_code=400, detail="regions must not be empty")
+        if len(regions) == len(KB_REGIONS):
+            raise HTTPException(
+                status_code=400,
+                detail="full reset is not allowed via API; use scripts/reset_kb.ps1",
+            )
+        if req.confirm != "RESET":
+            raise HTTPException(status_code=400, detail='confirm must be "RESET"')
+        try:
+            return reset_regions(guard, regions, backup=req.backup)
+        except WriteBoundaryError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
 
     @app.post("/api/enrich/run", dependencies=[Depends(auth)])
     def enrich_run(entry_id: str | None = None):

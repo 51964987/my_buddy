@@ -35,7 +35,8 @@ def test_url_entry_normalized_e2e(cfg, guard):
         guard.kb_root.joinpath(*f"sources/web/2026/{r['entry_id']}/meta.json".split("/")).read_text("utf-8")
     )
     assert len(meta["content_hash"]) == 40
-    assert meta["raw_files"] == ["raw/page.html"]
+    # SAMPLE_HTML 可见文本低于空壳阈值 → 旁路生成剥脚本快照（v0.43）
+    assert meta["raw_files"] == ["raw/page.html", "raw/page.view.html"]
     assert meta["original_url"] == "https://example.com/a?utm_source=x"
     assert not guard.exists(f"inbox/{r['entry_id']}")
 
@@ -123,7 +124,7 @@ def test_screenshot_saved(cfg, guard):
     entry_dir = guard.kb_root.joinpath(*f"sources/web/2026/{r['entry_id']}".split("/"))
     assert (entry_dir / "raw" / "screenshot.png").read_bytes() == b"\x89PNG-fake-screenshot"
     meta = json.loads((entry_dir / "meta.json").read_text("utf-8"))
-    assert meta["raw_files"] == ["raw/page.html", "raw/screenshot.png"]
+    assert meta["raw_files"] == ["raw/page.html", "raw/page.view.html", "raw/screenshot.png"]
     assert meta["captured_from"] == "browser_ext"
 
 
@@ -166,7 +167,8 @@ def test_extract_fallback_to_selection(cfg, guard):
     assert "selected key content" in note
     meta = json.loads((entry_dir / "meta.json").read_text("utf-8"))
     assert meta["extraction"] == "selection_fallback"
-    assert meta["raw_files"] == ["raw/page.html"]  # SPA 空壳仍保留
+    # SPA 空壳仍保留；v0.43 起旁路生成剥脚本可浏览快照（兜底关闭时对原始件剥脚本）
+    assert meta["raw_files"] == ["raw/page.html", "raw/page.view.html"]
 
 
 def test_extract_error_without_selection(cfg, guard):
@@ -199,7 +201,8 @@ def test_fetch_fail_fallback_then_full_recover(cfg, guard):
 
     meta = json.loads((entry_dir / "meta.json").read_text("utf-8"))
     assert meta["extraction"] == "full"
-    assert meta["raw_files"] == ["raw/page.html"]
+    # 短正文页同样低于空壳阈值 → 生成剥脚本快照（兜底关闭，对原始件构造）
+    assert meta["raw_files"] == ["raw/page.html", "raw/page.view.html"]
     assert "first paragraph" in (entry_dir / "note.md").read_text("utf-8")
 
 RENDERED_HTML = """<html><head><title>rendered spa</title></head><body>
@@ -242,7 +245,8 @@ def test_playwright_fallback_recovers_fetch_failure(cfg, guard):
     assert "dynamic rendered body content" in note
     meta = json.loads((entry_dir / "meta.json").read_text("utf-8"))
     assert meta["fetch"]["via"] == "playwright"
-    assert meta["raw_files"] == ["raw/page.html"]  # raw 升级为渲染后页面
+    # v0.43：渲染态 DOM 旁路生成剥脚本快照（不再二次渲染），raw 原件为渲染后页面
+    assert meta["raw_files"] == ["raw/page.html", "raw/page.view.html"]
 
 
 def test_playwright_fallback_on_empty_extract(cfg, guard):
@@ -298,3 +302,70 @@ def test_playwright_fallback_disabled_no_pw_call(cfg, guard):
     data = _capture_json(guard, r["entry_id"])
     assert data["status"] == "error"
     assert data["error_stage"] == "fetch"
+
+
+# ---- 可浏览快照（§5.1 v0.43）----
+
+LONG_HTML = (
+    "<html><head><title>long static page</title></head><body><article>"
+    + "<p>static article paragraph with plenty of readable text.</p>" * 6
+    + "</article></body></html>"
+)
+
+
+def test_view_snapshot_stripped_from_original_when_fallback_off(cfg, guard):
+    """空壳 + 兜底关闭：快照对原始件剥脚本，不渲染、raw/page.html 字节不变。"""
+    pw = _pw_fetcher()
+    orch = Orchestrator(cfg, guard, fetcher=make_fetcher(pages={"https://example.com/shell": SPA_HTML}), playwright_fetcher=pw)
+    r = _capture(guard, "https://example.com/shell", text="selection text")
+    orch.scan_once()
+    assert pw.calls["n"] == 0
+    d = guard.kb_root.joinpath(*f"sources/web/2026/{r['entry_id']}".split("/"))
+    raw = (d / "raw" / "page.html").read_text("utf-8")
+    view = (d / "raw" / "page.view.html").read_text("utf-8")
+    assert "<script" not in view.lower()
+    assert '<base href="https://example.com/shell"' in view
+    meta = json.loads((d / "meta.json").read_text("utf-8"))
+    assert meta["raw_files"] == ["raw/page.html", "raw/page.view.html"]
+
+
+def test_view_snapshot_renders_shell_with_pw(cfg, guard):
+    """空壳 + 兜底开启：快照经 Playwright 渲染取真实 DOM（仅渲染这一次，正文策略不变）。"""
+    cfg.data["normalize"]["playwright_fallback"] = True
+    pw = _pw_fetcher()
+    orch = Orchestrator(cfg, guard, fetcher=make_fetcher(pages={"https://example.com/spa9": SPA_HTML}), playwright_fetcher=pw)
+    r = _capture(guard, "https://example.com/spa9", text="selection text")
+    orch.scan_once()
+    assert pw.calls["n"] == 1  # 仅快照渲染；带选中文本不触发正文兜底
+    d = guard.kb_root.joinpath(*f"sources/web/2026/{r['entry_id']}".split("/"))
+    view = (d / "raw" / "page.view.html").read_text("utf-8")
+    assert "dynamic rendered body content" in view
+    assert "<script" not in view.lower()
+    assert '<base href="https://example.com/spa9"' in view
+    meta = json.loads((d / "meta.json").read_text("utf-8"))
+    assert meta["extraction"] == "selection_fallback"  # 正文提取策略不受快照影响
+
+
+def test_view_snapshot_pw_failure_degrades_to_original(cfg, guard):
+    """快照渲染失败：降级对原始件剥脚本落盘，不影响条目本身转态。"""
+    cfg.data["normalize"]["playwright_fallback"] = True
+    pw = _pw_fetcher(fail=True)
+    orch = Orchestrator(cfg, guard, fetcher=make_fetcher(pages={"https://example.com/spa10": SPA_HTML}), playwright_fetcher=pw)
+    r = _capture(guard, "https://example.com/spa10", text="selection text")
+    orch.scan_once()
+    d = guard.kb_root.joinpath(*f"sources/web/2026/{r['entry_id']}".split("/"))
+    view = (d / "raw" / "page.view.html").read_text("utf-8")
+    assert "<script" not in view.lower()
+    meta = json.loads((d / "meta.json").read_text("utf-8"))
+    assert meta["extraction"] == "selection_fallback"
+
+
+def test_view_snapshot_skipped_for_static_full_page(cfg, guard):
+    """静态正文页（可见文本充足）：page.html 本身可读，不生成快照。"""
+    orch = Orchestrator(cfg, guard, fetcher=make_fetcher(pages={"https://example.com/long": LONG_HTML}))
+    r = _capture(guard, "https://example.com/long")
+    orch.scan_once()
+    d = guard.kb_root.joinpath(*f"sources/web/2026/{r['entry_id']}".split("/"))
+    meta = json.loads((d / "meta.json").read_text("utf-8"))
+    assert meta["raw_files"] == ["raw/page.html"]
+    assert not (d / "raw" / "page.view.html").exists()

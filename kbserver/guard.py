@@ -47,12 +47,17 @@ STAGE_REGIONS: dict[str, set[str]] = {
     # v0.21 扩展至 inbox（丢弃通道：DELETE /api/inbox/{id} 物理删除废投递）；
     # v0.34 扩展至 collections —— 打回要复位 D 类源条目（字段级补丁 + meta.json）
     "curation": {REGION_WIKI, REGION_SOURCES, REGION_INBOX, REGION_COLLECTIONS},
+    # 库分区重置（§4.4 v0.44）：POST /api/kb/reset 按区清空（四区子集，不允许全选）
+    "reset": {REGION_INBOX, REGION_SOURCES, REGION_COLLECTIONS, REGION_WIKI},
 }
 
 # 破坏性操作（物理删除/整树移动）的收窄白名单：未列出的 stage 一律沿用
 # STAGE_REGIONS。collections 缺席即"镜像只可写不可删"（§4.4 v0.20 + v0.34）。
+# 例外：reset（v0.44）四区全放行——重置=废弃整个镜像含注册 collection.json，
+# sync 引擎不再 diff 抓回，与"镜像内单页删除会被抓回"语义不同（§4.4 实施口径）。
 STAGE_DESTRUCTIVE_REGIONS: dict[str, set[str]] = {
     "curation": {REGION_WIKI, REGION_SOURCES, REGION_INBOX},
+    "reset": {REGION_INBOX, REGION_SOURCES, REGION_COLLECTIONS, REGION_WIKI},
 }
 
 

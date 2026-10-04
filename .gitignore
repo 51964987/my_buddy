@@ -7,3 +7,5 @@ kb_service*.log
 .tmp*.py
 _*.py
 webui/node_modules/
+logs/
+kb-backup-*/

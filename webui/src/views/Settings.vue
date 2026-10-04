@@ -137,6 +137,44 @@ async function rebuildIndex() {
   }
 }
 
+// ---------- 库分区重置（§4.4 v0.44：部分重置 UI 化，全量重置走 scripts/reset_kb.ps1） ----------
+
+const RESET_REGIONS = [
+  { id: 'inbox', label: 'inbox（收件箱 + 归档）' },
+  { id: 'sources', label: 'sources（源条目 + raw 原件）' },
+  { id: 'collections', label: 'collections（D 类镜像 + 注册）' },
+  { id: 'wiki', label: 'wiki（AI 卡片）' },
+] as const
+const resetSel = ref<string[]>([])
+const resetBackup = ref(true) // 破坏性操作：备份默认勾选（§11.5 库维护分区）
+const resetConfirm = ref('')
+const resetting = ref(false)
+const resetReady = computed(
+  () => resetSel.value.length > 0 && resetSel.value.length < RESET_REGIONS.length && resetConfirm.value === 'RESET',
+)
+
+async function resetKb() {
+  if (!resetReady.value || resetting.value) return
+  resetting.value = true
+  try {
+    const r = await api.post<{ reset: string[]; counts: Record<string, number>; backup: string | null }>(
+      '/api/kb/reset',
+      { regions: resetSel.value, confirm: resetConfirm.value, backup: resetBackup.value },
+    )
+    const detail = r.reset.map((k) => `${k} ${r.counts[k] ?? 0} 项`).join('、')
+    notice.value =
+      `已重置：${detail}` +
+      (r.backup ? `；备份于 ${r.backup}` : '') +
+      '。索引随查询懒同步自动对齐；RAG 向量库如启用请手动重建。'
+    resetSel.value = []
+    resetConfirm.value = ''
+  } catch (e) {
+    error.value = String(e instanceof Error ? e.message : e)
+  } finally {
+    resetting.value = false
+  }
+}
+
 // ---------- 熔断运行态（§5.1 v0.29：程序写运行态，页面只读 + 显式恢复） ----------
 
 const breakerOpen = computed(() => cfg.ai?.breaker?.state === 'open')
@@ -186,6 +224,7 @@ const SECTIONS = [
   { id: 'sec-normalize', title: '归一化' },
   { id: 'sec-ai', title: 'AI 模型' },
   { id: 'sec-index', title: '索引' },
+  { id: 'sec-maint', title: '库维护' },
   { id: 'sec-parsers', title: '解析器注册表' },
   { id: 'sec-sync', title: 'D 类同步' },
 ]
@@ -496,6 +535,37 @@ onMounted(load)
     </div>
   </div>
 
+  <div id="sec-maint" class="panel">
+    <h2>库维护</h2>
+    <p class="muted" style="margin-top: 0">
+      分区重置为破坏性操作：物理删除选定分区内容并重建空目录，不可恢复。
+      index.db 不删（索引随查询懒同步自动对齐）；RAG 向量库如启用请重置后手动重建。
+      不支持四区全选——全量重置（含 index.db）请用 <code>scripts/reset_kb.ps1</code>。
+    </p>
+    <div class="form-row">
+      <label>重置分区</label>
+      <span class="reset-regions">
+        <label v-for="r in RESET_REGIONS" :key="r.id" class="reset-region">
+          <input v-model="resetSel" type="checkbox" :value="r.id" />
+          {{ r.label }}
+        </label>
+      </span>
+    </div>
+    <div class="form-row">
+      <label>重置前备份</label>
+      <input v-model="resetBackup" type="checkbox" />
+      <span class="hint">整库复制到库同级 kb-backup-&lt;时间戳&gt;（排除 index.db）</span>
+    </div>
+    <div class="form-row">
+      <label>确认执行（危险）</label>
+      <input v-model="resetConfirm" class="mono" style="width: 120px" placeholder="输入 RESET" />
+      <button class="danger" :disabled="!resetReady || resetting" @click="resetKb">
+        {{ resetting ? '重置中…' : '重置选定分区' }}
+      </button>
+      <span class="hint">至少选一个分区，且不允许全选四区</span>
+    </div>
+  </div>
+
   <div id="sec-parsers" class="panel">
     <h2>解析器注册表（只读）</h2>
     <p class="muted" style="margin-top: 0">
@@ -576,6 +646,20 @@ onMounted(load)
 /* 锚点跳转时给分区标题留出顶栏 + 余量 */
 .settings-content .panel {
   scroll-margin-top: 64px;
+}
+
+/* 库维护分区多选（v0.44）：横排勾选项，窄屏折行 */
+.reset-regions {
+  display: inline-flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.reset-region {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
 }
 
 /* 窄屏隐藏锚点导航，回到纵排 */
