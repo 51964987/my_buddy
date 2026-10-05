@@ -1,8 +1,13 @@
 <script setup lang="ts">
-/** 总览（运维者/整理监工姿态）：流程漏斗、首次向导、状态摘要、error 巡检重跑、索引与向量状态。 */
-import { computed, onMounted, ref } from 'vue'
+/** 总览（运维者/整理监工姿态）：流程图、首次向导、状态摘要、error 巡检重跑、索引与向量状态。 */
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { api, type StatusInfo, type WikiCard } from '../api'
+import { subscribeEvents } from '../sse'
+import type { FlowChartHandle } from '../flowchart'
 import GuideWizard from '../components/GuideWizard.vue'
+
+const router = useRouter()
 
 const st = ref<StatusInfo | null>(null)
 const error = ref('')
@@ -25,12 +30,15 @@ function replayGuide() {
 }
 
 // wiki 卡计数（v0.46 同时保留卡清单供卡类型细分）：draft/promoted 两态；取不到时显示 — 不阻塞页面
+// 计数口径（v0.55）：漏斗两站按待审单元计（type=summary 的卡，1 条目 1 单元）——
+// 实体/概念卡同名跨条目合并，按卡计会让待审核虚高、与审核台聚合视图行数对不上
 const wikiCards = ref<WikiCard[] | null>(null)
 const wikiCounts = computed<{ draft: number | null; promoted: number | null }>(() => {
   if (!wikiCards.value) return { draft: null, promoted: null }
+  const summary = (c: WikiCard) => c.type === 'summary'
   return {
-    draft: wikiCards.value.filter((c) => c.status === 'draft').length,
-    promoted: wikiCards.value.filter((c) => c.status === 'promoted').length,
+    draft: wikiCards.value.filter((c) => c.status === 'draft' && summary(c)).length,
+    promoted: wikiCards.value.filter((c) => c.status === 'promoted' && summary(c)).length,
   }
 })
 
@@ -82,7 +90,7 @@ const stations = computed<Station[]>(() => {
       label: '待审核（draft）',
       count: wikiCounts.value.draft,
       tone: (wikiCounts.value.draft ?? 0) > 0 ? 'todo' : 'ok',
-      hint: 'AI 产出的草稿卡，须人工晋升后才可被检索/图谱引用',
+      hint: '待审单元（draft 摘要卡，1 条目 1 单元）；实体卡折叠在审核台各条目组内',
       route: '/curation',
     },
     {
@@ -112,6 +120,113 @@ const suggestedKey = computed(() => {
   }
   return null
 })
+
+// ---------- 流程图（§11.8 ⑥ v0.53，B2 拍板）：ECharts 动态 import，独立 chunk ----------
+const chartEl = ref<HTMLElement | null>(null)
+let flow: FlowChartHandle | null = null
+
+// 节点内短标签（完整枚举原文进 tooltip，见 flowchart.ts）
+const SHORT_LABELS: Record<string, string> = {
+  inbox: '投递',
+  normalized: '待整理',
+  draft: '待审核',
+  promoted: '已晋升',
+  error: 'error',
+}
+
+function toFlowStation() {
+  return stations.value.map((s) => ({
+    key: s.key,
+    label: s.label,
+    short: SHORT_LABELS[s.key] ?? s.key,
+    count: s.count,
+    tone: s.tone,
+    suggested: s.key === suggestedKey.value,
+  }))
+}
+
+async function ensureChart() {
+  if (!chartEl.value || flow) return
+  const mod = await import('../flowchart')
+  flow = mod.createFlowChart(chartEl.value, onNodeClick)
+}
+
+function onNodeClick(key: string) {
+  // 跳转纪律沿用 §11.8 ①：站点点击 → 对应操作位（route 用 router.push，等价原 router-link）
+  const s = stations.value.find((x) => x.key === key)
+  if (!s) return
+  if (s.route) void router.push(s.route)
+  else s.onClick?.()
+}
+
+// flush:post：stations 由 st 驱动，容器 DOM 在同一次更新后才存在
+watch([stations, suggestedKey], async () => {
+  await ensureChart()
+  flow?.update(toFlowStation())
+}, { flush: 'post' })
+
+// ---------- SSE 实时动态（§11.8 ⑥ v0.53）：推送触发刷新，不携带聚合状态 ----------
+// 收到 kb.changed 后 debounce 重拉既有 load()（500ms 内多次写盘合并为一次拉取）
+const syncProg = ref<Record<string, { phase: string; done: number; total: number; errors: number }>>({})
+let reloadTimer: number | null = null
+let unsubscribers: (() => void)[] = []
+
+function scheduleReload() {
+  if (reloadTimer !== null) window.clearTimeout(reloadTimer)
+  reloadTimer = window.setTimeout(() => {
+    reloadTimer = null
+    void load()
+  }, 500)
+}
+
+function onSyncProgress(ev: { collection_id?: unknown; phase?: unknown; done?: unknown; total?: unknown; errors?: unknown }) {
+  if (typeof ev.collection_id !== 'string') return
+  const p = {
+    phase: String(ev.phase ?? ''),
+    done: Number(ev.done ?? 0),
+    total: Number(ev.total ?? 0),
+    errors: Number(ev.errors ?? 0),
+  }
+  syncProg.value = { ...syncProg.value, [ev.collection_id]: p }
+  if (p.phase === 'done' || p.phase === 'error') {
+    // 完成态保留 5s 供用户看到结果，随后清除该行进度
+    const id = ev.collection_id
+    window.setTimeout(() => {
+      const cur = syncProg.value[id]
+      if (cur && (cur.phase === 'done' || cur.phase === 'error')) {
+        const next = { ...syncProg.value }
+        delete next[id]
+        syncProg.value = next
+      }
+    }, 5000)
+  }
+}
+
+// 集合同步进度条：与文档树页 v0.52 两阶段折算同口径（fetch 70% + normalize 30%）
+function syncProgressView(p: { phase: string; done: number; total: number; errors: number }) {
+  if (!p.total) return null
+  if (p.phase === 'fetch') return { label: '抓取页面', percent: Math.round((70 * p.done) / p.total) }
+  if (p.phase === 'normalize') return { label: '归一化落盘', percent: 70 + Math.round((30 * p.done) / p.total) }
+  if (p.phase === 'done') return { label: '完成', percent: 100 }
+  if (p.phase === 'error') return { label: '失败', percent: null }
+  return null
+}
+
+/** 集合同步面板行内进度数据（无进行中/刚完成的同步返回 null，不渲染该行） */
+function activeSyncRow(id: string) {
+  const p = syncProg.value[id]
+  if (!p) return null
+  const v = syncProgressView(p)
+  if (!v) return null
+  return {
+    text:
+      v.percent === null
+        ? `同步失败（已抓 ${p.done}/${p.total}，详情见服务日志）`
+        : `${v.label} ${v.percent}%（${p.done}/${p.total}）`,
+    percent: v.percent === null ? 100 : v.percent,
+    failed: v.percent === null,
+  }
+}
 
 async function load() {
   try {
@@ -316,6 +431,31 @@ async function runBatch() {
   }
 }
 
+// 概念聚合（v0.56 第②批）：手动聚合一轮，基于既有实体卡 + enriched 条目产 draft 概念卡
+interface AggregateResult {
+  skipped_reason?: string
+  written?: { rel: string; title: string; sources: number; status: string }[]
+  discarded?: number
+  model?: string
+}
+const aggregating = ref(false)
+const aggregateResult = ref<AggregateResult | null>(null)
+
+async function runAggregate() {
+  if (!window.confirm('确认聚合概念卡？将基于现有实体卡与已整理条目做一轮聚类（一次模型调用）。')) return
+  aggregating.value = true
+  error.value = ''
+  aggregateResult.value = null
+  try {
+    aggregateResult.value = await api.post<AggregateResult>('/api/aggregate/run')
+    await load()
+  } catch (e) {
+    error.value = String(e instanceof Error ? e.message : e)
+  } finally {
+    aggregating.value = false
+  }
+}
+
 onMounted(() => {
   void load()
   // 首次向导：仅当 localStorage 无完成标记时弹出（§11.8）
@@ -324,6 +464,22 @@ onMounted(() => {
   } catch {
     /* 存储不可用则不自动弹，可经「重新查看指引」手动打开 */
   }
+  // SSE 订阅（v0.53）：先 load 再订阅，重连（_reconnected）整体重拉兜底
+  unsubscribers = [
+    subscribeEvents(['kb.changed', '_reconnected'], (ev) => {
+      if (ev.type === '_reconnected') void load()
+      else scheduleReload()
+    }),
+    subscribeEvents(['sync.progress'], (ev) => onSyncProgress(ev as { collection_id?: unknown })),
+  ]
+})
+
+onBeforeUnmount(() => {
+  unsubscribers.forEach((u) => u())
+  unsubscribers = []
+  if (reloadTimer !== null) window.clearTimeout(reloadTimer)
+  flow?.destroy()
+  flow = null
 })
 </script>
 
@@ -337,33 +493,20 @@ onMounted(() => {
         <h2>流程漏斗</h2>
         <button class="funnel-replay" @click="replayGuide">重新查看指引</button>
       </div>
-      <div class="funnel-row">
-        <template v-for="(s, i) in stations" :key="s.key">
-          <span v-if="i > 0" class="funnel-arrow" aria-hidden="true">→</span>
-          <div class="funnel-col">
-            <component
-              :is="s.route ? 'router-link' : 'button'"
-              v-bind="s.route ? { to: s.route } : { type: 'button' }"
-              class="funnel-station"
-              :class="[s.tone, { suggested: s.key === suggestedKey }]"
-              :title="s.hint"
-              @click="s.onClick?.()"
-            >
-              <div class="num">{{ s.count ?? '—' }}</div>
-              <div class="label">{{ s.label }}</div>
-              <div v-if="s.key === suggestedKey" class="suggest-tag">建议先处理</div>
-            </component>
-            <!-- 站点细分开关（§11.8 ③ v0.46）：仅计数 > 0 的站可展开下钻 -->
-            <button
-              v-if="(s.count ?? 0) > 0"
-              class="seg-toggle"
-              :aria-expanded="segOpen === s.key"
-              @click.stop="toggleSeg(s.key)"
-            >
-              {{ segOpen === s.key ? '收起 ▴' : '细分 ▾' }}
-            </button>
-          </div>
-        </template>
+      <!-- 流程图（§11.8 ⑥ v0.53）：散点节点 + 流动粒子 + error 旁路虚线；节点点击跳转沿用 ① 纪律 -->
+      <div ref="chartEl" class="flow-chart"></div>
+      <!-- 站点细分开关（§11.8 ③ v0.46）：移至图下按钮排，仅计数 > 0 的站可展开下钻 -->
+      <div v-if="stations.some((s) => (s.count ?? 0) > 0)" class="seg-row">
+        <button
+          v-for="s in stations.filter((x) => (x.count ?? 0) > 0)"
+          :key="s.key"
+          class="seg-toggle"
+          :class="{ active: segOpen === s.key }"
+          :aria-expanded="segOpen === s.key"
+          @click="toggleSeg(s.key)"
+        >
+          {{ s.label }} {{ segOpen === s.key ? '收起 ▴' : '细分 ▾' }}
+        </button>
       </div>
       <!-- segment 计数条：手风琴式同时只展开一站；只读（无着陆页不硬造入口） -->
       <div v-if="segOpen" class="seg-panel">
@@ -413,6 +556,21 @@ onMounted(() => {
           {{ batching ? '整理中…' : `跑一批（待整理 ${st.enrich.pending}）` }}
         </button>
         <span class="hint">单条与试跑在「文档树」页按页进行；要全量自动整理需在设置页把 trigger_mode 切 auto</span>
+      </div>
+      <div class="form-row">
+        <button :disabled="!st.ai_enabled || aggregating" @click="runAggregate">
+          {{ aggregating ? '聚合中…' : '聚合概念卡' }}
+        </button>
+        <span class="hint">对既有实体卡 + 已整理条目做一轮概念聚类（知识图谱第②批）；需在设置页为「概念聚合」配置模型，auto 模式下每批 enrich 后自动执行</span>
+      </div>
+      <div v-if="aggregateResult" class="muted" style="margin: 6px 0; font-size: 12px">
+        <template v-if="aggregateResult.skipped_reason === 'concept_card_not_configured'">
+          概念聚合未配置模型（<router-link to="/settings">设置页 → 任务分级 → 概念聚合</router-link>），已跳过。
+        </template>
+        <template v-else-if="aggregateResult.written?.length">
+          产出 {{ aggregateResult.written.length }} 张概念卡（丢弃 {{ aggregateResult.discarded }} 项，后端 {{ aggregateResult.model }}），已进<router-link to="/curation">审核台</router-link>待晋升：<span class="mono">{{ aggregateResult.written.map((w) => w.title).join('、') }}</span>
+        </template>
+        <template v-else>本轮未产出概念卡（模型判定无可聚合主题，丢弃 {{ aggregateResult.discarded }} 项）。</template>
       </div>
       <div v-if="batchResults" class="table-scroll" style="margin-top: 10px">
         <table class="list">
@@ -526,6 +684,22 @@ onMounted(() => {
               <td class="muted mono">{{ c.last_synced_at ?? '—' }}</td>
               <td><button v-if="editingId !== c.id" @click="startEdit(c)">编辑</button></td>
             </tr>
+            <!-- v0.53：SSE 实时同步进度行（与文档树页 v0.52 两阶段折算同口径） -->
+            <tr v-if="activeSyncRow(c.id)">
+              <td colspan="6">
+                <div class="sync-live">
+                  <span class="mono muted">{{ c.id }}</span>
+                  <div class="progress-track" style="flex: 1">
+                    <div
+                      class="progress-fill"
+                      :class="{ indeterminate: activeSyncRow(c.id)?.failed }"
+                      :style="{ width: (activeSyncRow(c.id)?.percent ?? 100) + '%' }"
+                    ></div>
+                  </div>
+                  <span class="hint">{{ activeSyncRow(c.id)?.text }}</span>
+                </div>
+              </td>
+            </tr>
             <!-- v0.50 行内编辑：名称 + 入口 URL，保存走 PATCH 通道 -->
             <tr v-if="editingId === c.id">
               <td colspan="6">
@@ -563,103 +737,28 @@ onMounted(() => {
 .funnel-head h2 {
   margin: 0;
 }
-.funnel-row {
+/* 流程图（§11.8 ⑥ v0.53） */
+.flow-chart {
+  width: 100%;
+  height: 230px;
+}
+/* 站点细分按钮排（v0.53 自漏斗站点下缘移至图下） */
+.seg-row {
   display: flex;
-  align-items: stretch;
-  gap: 8px;
+  align-items: center;
+  gap: 10px;
   flex-wrap: wrap;
+  margin-top: 4px;
 }
-.funnel-arrow {
-  align-self: center;
-  color: #b0b0b0;
-  font-size: 16px;
-}
-.funnel-station {
-  position: relative;
-  flex: 1;
-  min-width: 130px;
-  text-align: center;
-  border: 1px solid #e0e0e0;
-  border-radius: 8px;
-  padding: 10px 8px 12px;
-  background: #fafafa;
-  cursor: pointer;
-  color: inherit;
-  font: inherit;
-  text-decoration: none;
-  display: block;
-  transition: border-color 0.15s, box-shadow 0.15s;
-}
-.funnel-station:hover {
-  border-color: #3b82f6;
-  box-shadow: 0 1px 6px rgba(59, 130, 246, 0.25);
-}
-.funnel-station .num {
-  font-size: 22px;
+.seg-toggle.active {
   font-weight: 600;
-  line-height: 1.2;
-}
-.funnel-station .label {
-  font-size: 12px;
-  color: #666;
-  margin-top: 2px;
-}
-.funnel-station.ok .num {
-  color: #9aa0a6;
-}
-.funnel-station.todo .num {
-  color: #2563eb;
-}
-.funnel-station.todo {
-  border-color: #bfdbfe;
-  background: #eff6ff;
-}
-.funnel-station.danger .num {
-  color: #dc2626;
-}
-.funnel-station.danger {
-  border-color: #fecaca;
-  background: #fef2f2;
-}
-.funnel-station.suggested {
-  box-shadow: 0 0 0 2px #3b82f6 inset;
-}
-.suggest-tag {
-  position: absolute;
-  top: -9px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: #3b82f6;
-  color: #fff;
-  font-size: 11px;
-  border-radius: 8px;
-  padding: 1px 8px;
-  white-space: nowrap;
+  text-decoration: underline;
 }
 .funnel-note {
   margin: 10px 0 0;
   font-size: 12px;
 }
 /* 站点细分（v0.46 展开下钻） */
-.funnel-col {
-  flex: 1;
-  min-width: 130px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.seg-toggle {
-  align-self: center;
-  border: none;
-  background: none;
-  color: #3b82f6;
-  font-size: 12px;
-  cursor: pointer;
-  padding: 2px 6px;
-}
-.seg-toggle:hover {
-  text-decoration: underline;
-}
 .seg-panel {
   margin-top: 10px;
   padding: 8px 12px;
@@ -683,6 +782,12 @@ onMounted(() => {
 }
 .seg-chip b {
   color: #2563eb;
+}
+/* 集合同步实时进度行（v0.53 SSE） */
+.sync-live {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 /* 集合行内编辑（v0.50） */
 .coll-edit {

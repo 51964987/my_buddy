@@ -28,6 +28,7 @@ from typing import Any
 
 import yaml
 
+from . import events
 from .frontmatter import split_note
 
 REGION_INBOX = "inbox"
@@ -49,6 +50,10 @@ STAGE_REGIONS: dict[str, set[str]] = {
     "curation": {REGION_WIKI, REGION_SOURCES, REGION_INBOX, REGION_COLLECTIONS},
     # 库分区重置（§4.4 v0.44）：POST /api/kb/reset 按区清空（四区子集，不允许全选）
     "reset": {REGION_INBOX, REGION_SOURCES, REGION_COLLECTIONS, REGION_WIKI},
+    # 概念聚合（§4.4/§5.1 v0.40，v0.56 落地）：概念卡只写 wiki/ 隔离区。
+    # 两张区域表核对（v0.34 教训）：不进破坏性表 → 破坏性写回落普通表仍只有
+    # wiki/，聚合并无删除/移动需求，语义正确。
+    "aggregate": {REGION_WIKI},
 }
 
 # 破坏性操作（物理删除/整树移动）的收窄白名单：未列出的 stage 一律沿用
@@ -122,7 +127,10 @@ class Guard:
 
     def write_bytes(self, stage: str, rel: str, data: bytes) -> Path:
         path = self._check(stage, rel)
-        return atomic_write(path, data)
+        result = atomic_write(path, data)
+        # v0.53 事件总线（§11.8 ⑥）：成功写盘后发变更通知（不含内容，前端重拉聚合端点）
+        events.publish("kb.changed", stage=stage, op="write", path=rel)
+        return result
 
     def write_json(self, stage: str, rel: str, obj: Any) -> Path:
         return self.write_text(stage, rel, json.dumps(obj, ensure_ascii=False, indent=2))
@@ -145,6 +153,8 @@ class Guard:
         fm.update(patch)
         text = "---\n" + yaml.safe_dump(fm, allow_unicode=True, sort_keys=False) + "---\n\n" + body
         atomic_write(path, text.encode("utf-8"))
+        # v0.53：字段级补丁同样是落盘变更，走同一事件通道
+        events.publish("kb.changed", stage=stage, op="patch", path=rel)
         return fm
 
     def resolve(self, stage: str, rel: str) -> Path:
@@ -162,11 +172,15 @@ class Guard:
             return
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dst))
+        # v0.53：整树移动（归一化投递 inbox→sources 等）也是落盘变更
+        events.publish("kb.changed", stage=stage, op="move", path=dst_rel)
 
     def remove_tree(self, stage: str, rel: str) -> None:
         path = self._check(stage, rel, destructive=True)
         if path.exists():
             shutil.rmtree(path)
+            # v0.53：删除同样是落盘变更（error 巡检丢弃/重置等）
+            events.publish("kb.changed", stage=stage, op="remove", path=rel)
 
     def remove_path(self, stage: str, rel: str) -> None:
         """删除文件或目录（curation 处置用：wiki 卡是单文件，条目目录是树）。
@@ -176,5 +190,7 @@ class Guard:
         path = self._check(stage, rel, destructive=True)
         if path.is_dir():
             shutil.rmtree(path)
+            events.publish("kb.changed", stage=stage, op="remove", path=rel)  # v0.53
         elif path.exists():
             path.unlink()
+            events.publish("kb.changed", stage=stage, op="remove", path=rel)  # v0.53

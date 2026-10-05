@@ -20,7 +20,7 @@ const TASKS = [
   { key: 'tags', label: '标签 tags' },
   { key: 'summary_card', label: '摘要卡 summary_card' },
   { key: 'entity_extraction', label: '实体抽取 entity_extraction（知识图谱）' },
-  { key: 'concept_card', label: '概念聚合 concept_card（知识图谱，二期接入）' },
+  { key: 'concept_card', label: '概念聚合 concept_card（知识图谱）' },
   { key: 'embedding', label: '向量 embedding' },
 ]
 
@@ -29,7 +29,7 @@ const providerNames = () => Object.keys(cfg.ai?.providers ?? {})
 // 任务实际生效的后端提示：model 空 = 用 provider 默认（§9 决策 4 分级解析规则）
 function taskBackendHint(task: string): string {
   const t = cfg.ai?.tasks?.[task]
-  if (!t?.provider) return '未配置（该任务不执行；concept_card 为聚合任务槽，二期接入）'
+  if (!t?.provider) return '未配置（该任务不执行；concept_card 未配置时概念聚合整体跳过）'
   const p = cfg.ai.providers[t.provider] ?? {}
   const model = t.model || p.model || '(空!)'
   const key = p.api_key_env

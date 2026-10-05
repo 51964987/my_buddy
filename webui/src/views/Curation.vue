@@ -1,12 +1,12 @@
 <script setup lang="ts">
 /**
- * AI 审核台（整理监工姿态，§4.5 v0.35）：draft 卡处置（修订/晋升/打回/删除）+ enrich 操作日志。
- *
- * 详情区按业界人工复核的通行口径组织（先看清"AI 产出了什么"，而不是只看一坨产物）：
- * AI 元信息（模型/时间/置信度/是否人工修订）+ AI 摘要与 AI 标签（存在**源条目** frontmatter，
- * 须按 sources 联查——这是"AI 到底说了什么"的直接答案）+ 渲染后的卡正文 + 原文入口。
+ * AI 审核台（整理监工姿态，§4.5 v0.35；v0.55 按条目聚合）：
+ * 审核单元 = 一次 AI 整理的源条目——摘要卡为主行，关联实体/概念卡折叠为组内明细
+ * （归属按实体卡 sources[0]，即首次抽出条目；同名跨条目合并的实体卡只出现在首源组）。
+ * 组级「整条晋升 / 整条打回」+ 跨组勾选批量处置（POST /api/wiki/batch 逐条收口）。
+ * 卡详情口径不变（v0.35）：AI 元信息 + 源条目 AI 摘要与标签（摘要卡按 sources 联查）+ 渲染正文 + 原文入口。
  */
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api, type WikiCard } from '../api'
 import { renderMarkdown } from '../markdown'
 
@@ -18,6 +18,120 @@ const error = ref('')
 const notice = ref('')
 const busy = ref('')
 const expanded = ref<string>('')
+const openedGroup = ref<string>('')
+const checked = ref<Set<string>>(new Set()) // 勾选的审核单元（组键 = 摘要卡 sources[0]）
+
+const TYPE_LABELS: Record<string, string> = { summary: '摘要卡', entity: '实体卡', concept: '概念卡' }
+
+/** 审核单元：一条源条目 = 摘要卡主行 + 折叠的实体/概念明细 */
+interface EntryGroup {
+  key: string
+  summary: WikiCard
+  related: WikiCard[]
+}
+
+const groups = computed<EntryGroup[]>(() => {
+  const byKey = new Map<string, EntryGroup>()
+  for (const s of cards.value.filter((c) => c.type === 'summary')) {
+    const key = s.sources[0] ?? s.id
+    byKey.set(key, { key, summary: s, related: [] })
+  }
+  for (const c of cards.value) {
+    if (c.type === 'summary') continue
+    byKey.get(c.sources[0] ?? '')?.related.push(c)
+  }
+  return [...byKey.values()].sort((a, b) => (b.summary.created_at ?? '').localeCompare(a.summary.created_at ?? ''))
+})
+
+/** 无主明细卡：首源条目已无摘要卡（如摘要卡被单独删除），单列处置，正常流程不产生 */
+const orphans = computed(() => {
+  const keys = new Set(cards.value.filter((c) => c.type === 'summary').map((c) => c.sources[0] ?? c.id))
+  return cards.value.filter((c) => c.type !== 'summary' && !keys.has(c.sources[0] ?? ''))
+})
+
+const relatedTotal = computed(() => groups.value.reduce((n, g) => n + g.related.length, 0))
+
+const allChecked = computed(() => groups.value.length > 0 && groups.value.every((g) => checked.value.has(g.key)))
+
+function toggleGroup(key: string) {
+  const next = new Set(checked.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  checked.value = next
+}
+
+function toggleAll() {
+  checked.value = allChecked.value ? new Set() : new Set(groups.value.map((g) => g.key))
+}
+
+function toggleGroupOpen(key: string) {
+  openedGroup.value = openedGroup.value === key ? '' : key
+}
+
+/** 表格扁平行模型：组主行（摘要卡）/ 明细开关行 / 明细行（实体卡），单一 v-for 渲染保证详情行紧跟其卡行 */
+type Row =
+  | { kind: 'card'; card: WikiCard; group: EntryGroup; role: 'summary' | 'related' }
+  | { kind: 'toggle'; group: EntryGroup }
+
+const rows = computed<Row[]>(() => {
+  const out: Row[] = []
+  for (const g of groups.value) {
+    out.push({ kind: 'card', card: g.summary, group: g, role: 'summary' })
+    if (g.related.length) out.push({ kind: 'toggle', group: g })
+    if (openedGroup.value === g.key) {
+      for (const c of g.related) out.push({ kind: 'card', card: c, group: g, role: 'related' })
+    }
+  }
+  return out
+})
+
+const draftRelated = (g: EntryGroup) => g.related.filter((c) => c.status === 'draft').length
+
+/** 组内各卡的处置清单：整条晋升=全部 draft 卡晋升；整条打回=摘要卡打回（源条目复位重生成）+ draft 实体卡删除（重生成时重建）。promoted 实体卡保留——人工已接受过，不因整条打回降级 */
+function groupItems(g: EntryGroup, kind: 'promote-all' | 'redo'): { id: string; action: string }[] {
+  if (kind === 'promote-all') {
+    return [g.summary, ...g.related].filter((c) => c.status === 'draft').map((c) => ({ id: c.id, action: 'promote' }))
+  }
+  const items = [{ id: g.summary.id, action: 'regenerate' }]
+  for (const c of g.related) if (c.status === 'draft') items.push({ id: c.id, action: 'delete' })
+  return items
+}
+
+async function batchAction(items: { id: string; action: string }[], what: string) {
+  busy.value = 'batch'
+  error.value = ''
+  notice.value = ''
+  try {
+    const r = await api.post<{ results: { id: string; ok: boolean }[] }>('/api/wiki/batch', { items })
+    const fails = r.results.filter((x) => !x.ok).length
+    notice.value = fails ? `${what}：${r.results.length - fails} 成功 / ${fails} 失败（明细见下方刷新后的状态列）` : `${what}：共 ${r.results.length} 项`
+    checked.value = new Set()
+    await load()
+    emit('refresh-badge')
+  } catch (e) {
+    error.value = String(e instanceof Error ? e.message : e)
+  } finally {
+    busy.value = ''
+  }
+}
+
+function groupPromote(g: EntryGroup) {
+  const items = groupItems(g, 'promote-all')
+  if (!items.length) return
+  batchAction(items, '整条晋升')
+}
+
+function groupRedo(g: EntryGroup) {
+  if (!window.confirm(`确认整条打回？\n摘要卡删除 + 源条目复位 normalized（AI 重新生成），组内 draft 实体卡一并删除。\n条目：${g.summary.title || g.key}`)) return
+  batchAction(groupItems(g, 'redo'), '整条打回')
+}
+
+function batchChecked(kind: 'promote-all' | 'redo') {
+  const sel = groups.value.filter((g) => checked.value.has(g.key))
+  if (!sel.length) return
+  if (kind === 'redo' && !window.confirm(`确认批量整条打回 ${sel.length} 条？各条目的 AI 产出将删除并重新生成。`)) return
+  batchAction(sel.flatMap((g) => groupItems(g, kind)), kind === 'promote-all' ? `批量整条晋升 ${sel.length} 条` : `批量整条打回 ${sel.length} 条`)
+}
 
 /** 展开的卡详情：卡正文 + 源条目 AI 产出（摘要/标签/原文 URL） */
 interface Detail {
@@ -81,11 +195,12 @@ async function toggleBody(card: WikiCard) {
   busy.value = `${card.id}:load`
   try {
     const d = await api.get<WikiCard>(`/api/wiki/${card.id}`)
-    const entryId = d.sources?.[0]
     let source: Detail['source']
-    if (entryId) {
+    // 源条目 AI 摘要/标签联查只对摘要卡有意义（实体卡正文自带结构化信息）；
+    // 源条目已被人工删除时只显示卡本身，不阻塞审核
+    if (d.type === 'summary' && d.sources?.[0]) {
+      const entryId = d.sources[0]
       try {
-        // 卡正文不带 AI 摘要/标签（它们在源条目 frontmatter），须联查条目详情
         const e = await api.get<{ frontmatter: Record<string, unknown> }>(`/api/entries/${entryId}`)
         const fm = e.frontmatter
         const ai = (fm.ai ?? {}) as Record<string, unknown>
@@ -98,7 +213,7 @@ async function toggleBody(card: WikiCard) {
           tags: Array.isArray(fm.tags) ? (fm.tags as string[]) : [],
         }
       } catch {
-        source = undefined // 源条目已被人工删除：只显示卡本身，不阻塞审核
+        source = undefined
       }
     }
     detail.value = { ...detail.value, [card.id]: { body: d.body ?? '', source } }
@@ -149,98 +264,156 @@ onMounted(load)
   <div class="panel">
     <h2>wiki 卡审核（AI 产出一律 draft，晋升仅人工触发）</h2>
     <p class="muted" style="margin-top: -4px">
-      点标题展开：AI 摘要与 AI 标签（AI 到底写了什么）、模型/时间/置信度、渲染后的正文、原文入口；draft 可修订后再晋升。
+      按条目聚合（v0.55）：每行是一次 AI 整理（审核单元 = 源条目），实体/概念卡折叠在组内明细；
+      点标题展开 AI 摘要/标签、渲染正文与原文入口，单卡处置在详情里，组级可整条晋升/打回，勾选多行批量操作。
     </p>
-    <p v-if="!cards.length" class="muted">暂无卡片。开启 AI 整理（ai.enabled）后由 enrich 流水线产出。</p>
-    <div v-else class="table-scroll">
-    <table class="list">
-      <thead>
-        <tr><th>标题</th><th>状态</th><th>置信度</th><th>来源</th><th>生成信息</th><th style="width: 180px">处置</th></tr>
-      </thead>
-      <tbody>
-        <template v-for="card in cards" :key="card.id">
+    <p v-if="!groups.length" class="muted">暂无卡片。开启 AI 整理（ai.enabled）后由 enrich 流水线产出。</p>
+    <template v-else>
+      <div v-if="checked.size" class="row-actions" style="margin-bottom: 8px">
+        <b>已勾选 {{ checked.size }} 条</b>
+        <button class="primary" :disabled="busy === 'batch'" @click="batchChecked('promote-all')">批量整条晋升</button>
+        <button :disabled="busy === 'batch'" @click="batchChecked('redo')">批量整条打回</button>
+        <button @click="checked = new Set()">清除选择</button>
+      </div>
+      <div class="table-scroll">
+      <table class="list">
+        <thead>
           <tr>
-            <td style="cursor: pointer" @click="toggleBody(card)">
-              <b>{{ card.title || card.id }}</b>
-              <span class="badge ai-mark" style="margin-left: 6px">AI 生成</span>
-              <span v-if="card.edited_at" class="badge human-mark" style="margin-left: 6px">已人工修订</span>
-              <div class="mono muted" style="font-size: 11px">{{ card.id }} · {{ card.type }}</div>
-            </td>
-            <td><span class="badge" :class="`st-${card.status}`">{{ card.status }}</span></td>
-            <td class="mono">{{ card.confidence ?? '—' }}</td>
-            <td class="mono muted">{{ card.sources.join('、') }}</td>
-            <td class="muted" style="font-size: 12px">
-              {{ card.model }}<br />{{ card.created_at }}
-              <div v-if="card.edited_at" style="font-size: 11px">修订于 {{ card.edited_at }}</div>
-            </td>
-            <td>
-              <div class="row-actions">
-                <button
-                  v-if="card.status === 'draft'"
-                  class="primary"
-                  :disabled="busy === `${card.id}:promote`"
-                  @click="act(card, 'promote')"
-                >晋升</button>
-                <button
-                  title="删除该卡片并重置源条目为 normalized，AI 将重新生成"
-                  :disabled="busy === `${card.id}:regenerate`"
-                  @click="act(card, 'regenerate')"
-                >打回</button>
-                <button class="danger" :disabled="busy === `${card.id}:delete`" @click="act(card, 'delete')">删除</button>
-              </div>
-            </td>
+            <th style="width: 32px"><input type="checkbox" :checked="allChecked" title="全选/全不选" @change="toggleAll" /></th>
+            <th>条目（摘要卡）</th><th>状态</th><th>置信度</th><th>生成信息</th><th style="width: 240px">处置</th>
           </tr>
-          <tr v-if="expanded === card.id">
-            <td colspan="6">
-              <div class="card-detail">
-                <p class="card-meta">
-                  <span class="muted">
-                    模型 <span class="mono">{{ card.model || '—' }}</span> ·
-                    生成 {{ card.created_at || '—' }} ·
-                    置信度 <span class="mono">{{ card.confidence ?? '—' }}</span>
-                    <span v-if="card.edited_at"> · 人工修订 {{ card.edited_at }}</span>
-                  </span>
-                </p>
-                <p class="card-meta">
-                  <b>AI 摘要</b>：{{ detail[card.id]?.source?.aiSummary || '（源条目无 ai.summary）' }}
-                </p>
-                <p class="card-meta">
-                  <b>AI 标签</b>：
-                  <span v-if="detail[card.id]?.source?.tags?.length" class="mono">
-                    {{ detail[card.id]?.source?.tags.join('、') }}
-                  </span>
-                  <span v-else class="muted">（无）</span>
-                </p>
-                <p class="card-meta">
-                  <span v-if="detail[card.id]?.source?.url">
-                    原文：<a :href="detail[card.id]!.source!.url!" target="_blank" rel="noopener noreferrer">{{ detail[card.id]?.source?.url }}</a>
-                  </span>
-                  <span v-else class="muted">原文：无 URL 记录</span>
-                  <span class="muted mono"> · 源条目 <span class="mono">{{ detail[card.id]?.source?.id || card.sources[0] }}</span></span>
-                </p>
-
-                <div v-if="editingId === card.id" class="card-edit">
-                  <textarea v-model="editBody" rows="14" class="mono"></textarea>
-                  <div class="row-actions" style="margin-top: 8px">
-                    <button class="primary" :disabled="busy === `${card.id}:edit`" @click="saveEdit(card)">保存修订</button>
-                    <button @click="cancelEdit">取消</button>
-                  </div>
+        </thead>
+        <tbody>
+          <template v-for="row in rows" :key="row.kind === 'card' ? row.card.id : `toggle-${row.group.key}`">
+            <tr v-if="row.kind === 'card'">
+              <td>
+                <input
+                  v-if="row.role === 'summary'"
+                  type="checkbox"
+                  :checked="checked.has(row.group.key)"
+                  :title="`勾选条目：${row.group.summary.title || row.group.key}`"
+                  @change="toggleGroup(row.group.key)"
+                />
+              </td>
+              <td style="cursor: pointer" @click="toggleBody(row.card)">
+                <b>{{ row.card.title || row.card.id }}</b>
+                <span class="badge ai-mark" style="margin-left: 6px">AI 生成</span>
+                <span v-if="row.role === 'related'" class="badge" style="margin-left: 6px">{{ TYPE_LABELS[row.card.type] ?? row.card.type }}</span>
+                <span v-if="row.card.edited_at" class="badge human-mark" style="margin-left: 6px">已人工修订</span>
+                <div class="mono muted" style="font-size: 11px">
+                  {{ row.role === 'summary' ? `源条目 ${row.group.key}` : row.card.id }}
                 </div>
-                <template v-else>
-                  <div class="row-actions" style="margin: 8px 0">
-                    <button v-if="card.status === 'draft'" @click="startEdit(card)">编辑草稿</button>
-                    <span v-else class="muted" style="font-size: 12px">promoted 卡不可修订（已是索引引用源）</span>
+              </td>
+              <td><span class="badge" :class="`st-${row.card.status}`">{{ row.card.status }}</span></td>
+              <td class="mono">{{ row.card.confidence ?? '—' }}</td>
+              <td class="muted" style="font-size: 12px">
+                {{ row.card.model }}<br />{{ row.card.created_at }}
+                <div v-if="row.card.edited_at" style="font-size: 11px">修订于 {{ row.card.edited_at }}</div>
+              </td>
+              <td>
+                <!-- 组级操作只挂摘要卡主行；单卡处置在展开详情里，明细行保留行内单卡处置 -->
+                <div v-if="row.role === 'summary'" class="row-actions">
+                  <button
+                    v-if="row.card.status === 'draft' || draftRelated(row.group)"
+                    class="primary"
+                    :disabled="busy === 'batch'"
+                    @click="groupPromote(row.group)"
+                  >整条晋升</button>
+                  <button :disabled="busy === 'batch'" @click="groupRedo(row.group)">整条打回</button>
+                  <button v-if="row.group.related.length" @click="toggleGroupOpen(row.group.key)">
+                    {{ openedGroup === row.group.key ? '收起明细' : `明细 ${row.group.related.length}` }}
+                  </button>
+                </div>
+                <div v-else class="row-actions">
+                  <button
+                    v-if="row.card.status === 'draft'"
+                    class="primary"
+                    :disabled="busy === `${row.card.id}:promote`"
+                    @click="act(row.card, 'promote')"
+                  >晋升</button>
+                  <button
+                    title="删除该卡片并重置其全部来源条目为 normalized"
+                    :disabled="busy === `${row.card.id}:regenerate`"
+                    @click="act(row.card, 'regenerate')"
+                  >打回</button>
+                  <button class="danger" :disabled="busy === `${row.card.id}:delete`" @click="act(row.card, 'delete')">删除</button>
+                </div>
+              </td>
+            </tr>
+            <tr v-else>
+              <td></td>
+              <td colspan="5">
+                <button class="link-toggle" style="background: none; border: none; cursor: pointer; color: var(--accent, #2563eb); padding: 0" @click="toggleGroupOpen(row.group.key)">
+                  {{ openedGroup === row.group.key ? '▾' : '▸' }}
+                  实体/概念卡 {{ row.group.related.length }} 张（{{ draftRelated(row.group) }} 张待审）
+                </button>
+              </td>
+            </tr>
+            <tr v-if="row.kind === 'card' && expanded === row.card.id">
+              <td colspan="6">
+                <div class="card-detail">
+                  <p class="card-meta">
+                    <span class="muted">
+                      模型 <span class="mono">{{ row.card.model || '—' }}</span> ·
+                      生成 {{ row.card.created_at || '—' }} ·
+                      置信度 <span class="mono">{{ row.card.confidence ?? '—' }}</span>
+                      <span v-if="row.card.edited_at"> · 人工修订 {{ row.card.edited_at }}</span>
+                    </span>
+                  </p>
+                  <template v-if="detail[row.card.id]?.source">
+                    <p class="card-meta">
+                      <b>AI 摘要</b>：{{ detail[row.card.id]!.source!.aiSummary || '（源条目无 ai.summary）' }}
+                    </p>
+                    <p class="card-meta">
+                      <b>AI 标签</b>：
+                      <span v-if="detail[row.card.id]!.source!.tags?.length" class="mono">
+                        {{ detail[row.card.id]!.source!.tags.join('、') }}
+                      </span>
+                      <span v-else class="muted">（无）</span>
+                    </p>
+                    <p class="card-meta">
+                      <span v-if="detail[row.card.id]?.source?.url">
+                        原文：<a :href="detail[row.card.id]!.source!.url!" target="_blank" rel="noopener noreferrer">{{ detail[row.card.id]?.source?.url }}</a>
+                      </span>
+                      <span v-else class="muted">原文：无 URL 记录</span>
+                      <span class="muted mono"> · 源条目 <span class="mono">{{ detail[row.card.id]!.source!.id }}</span></span>
+                    </p>
+                  </template>
+                  <div v-if="editingId === row.card.id" class="card-edit">
+                    <textarea v-model="editBody" rows="14" class="mono"></textarea>
+                    <div class="row-actions" style="margin-top: 8px">
+                      <button class="primary" :disabled="busy === `${row.card.id}:edit`" @click="saveEdit(row.card)">保存修订</button>
+                      <button @click="cancelEdit">取消</button>
+                    </div>
                   </div>
-                  <!-- 卡正文来自 LLM（不可信输入）：必须经 markdown.ts（marked+DOMPurify）净化后渲染 -->
-                  <div class="md-body" v-html="renderMarkdown(detail[card.id]?.body)"></div>
-                </template>
-              </div>
-            </td>
-          </tr>
-        </template>
-      </tbody>
-    </table>
-    </div>
+                  <template v-else>
+                    <div class="row-actions" style="margin: 8px 0">
+                      <button v-if="row.card.status === 'draft'" class="primary" @click="act(row.card, 'promote')">晋升</button>
+                      <button title="删除该卡片并重置其全部来源条目为 normalized" @click="act(row.card, 'regenerate')">打回</button>
+                      <button class="danger" @click="act(row.card, 'delete')">删除</button>
+                      <button v-if="row.card.status === 'draft'" @click="startEdit(row.card)">编辑草稿</button>
+                      <span v-else class="muted" style="font-size: 12px">promoted 卡不可修订（已是索引引用源）</span>
+                    </div>
+                    <!-- 卡正文来自 LLM（不可信输入）：必须经 markdown.ts（marked+DOMPurify）净化后渲染 -->
+                    <div class="md-body" v-html="renderMarkdown(detail[row.card.id]?.body)"></div>
+                  </template>
+                </div>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+      </div>
+      <div v-if="orphans.length" style="margin-top: 12px">
+        <h3>无主明细卡（{{ orphans.length }} 张，首次来源条目已无摘要卡）</h3>
+        <p class="muted" style="font-size: 12px">正常流程不产生；可直接晋升或删除。</p>
+        <div class="row-actions">
+          <button v-for="c in orphans" :key="c.id" :disabled="busy === `${c.id}:promote`" @click="act(c, 'promote')">
+            晋升 {{ c.title || c.id }}
+          </button>
+        </div>
+      </div>
+    </template>
   </div>
 
   <div class="panel">

@@ -7,6 +7,7 @@ Query·运维 API 含检索（P4 起全文，v0.17 增语义模式）、索引�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import sqlite3
@@ -17,13 +18,14 @@ from urllib.parse import quote
 
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import __version__
 from . import curation
+from . import events
 from . import exporter
 from .capture import CaptureError, accept_capture
 from .config import Config
@@ -100,7 +102,10 @@ def create_app(cfg: Config | None = None, orchestrator: Orchestrator | None = No
             (cfg.kb_root / region).mkdir(parents=True, exist_ok=True)
         if cfg.data.get("pipeline", {}).get("worker_enabled", True):
             orch.start()
+        # v0.53 事件总线（§11.8 ⑥）：注入主事件循环，工作线程发布事件经此投递给 SSE 订阅者
+        events.set_loop(asyncio.get_running_loop())
         yield
+        events.set_loop(None)
         orch.stop()
 
     app = FastAPI(title="kbserver", version=__version__, lifespan=lifespan)
@@ -113,6 +118,20 @@ def create_app(cfg: Config | None = None, orchestrator: Orchestrator | None = No
     @app.get("/", dependencies=[Depends(auth)])
     def root():
         return {"service": "kbserver", "version": __version__, "docs": "/docs"}
+
+    @app.get("/api/events", dependencies=[Depends(auth)])
+    async def sse_events():
+        """SSE 事件流（§11.8 ⑥ v0.53）：kb.changed / sync.progress 推送。
+
+        只发「变更通知」不发内容——前端收到后 debounce 重拉聚合端点（§11.8 ⑥
+        推送触发刷新口径）。流生成器与心跳在 events.sse_generator（独立成函数
+        以便 asyncio 直驱测试），此处只做鉴权与响应包装。
+        """
+        return StreamingResponse(
+            events.sse_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.post("/api/capture", dependencies=[Depends(auth)])
     def capture(req: CaptureRequest):
@@ -323,6 +342,36 @@ def create_app(cfg: Config | None = None, orchestrator: Orchestrator | None = No
             # 模型不可达/超时/返回非 JSON：上游失败语义，不泄露凭据（消息已由 llm 层掩码）
             raise HTTPException(status_code=502, detail=str(exc))
 
+    @app.post("/api/aggregate/preview", dependencies=[Depends(auth)])
+    def aggregate_preview():
+        """概念聚合试跑（dry-run，**零落盘**，§5.1 v0.56）：返回解析后概念清单/丢弃数/实际后端/耗时。
+
+        受 ai.enabled 总闸约束；不受 trigger_mode 与熔断门控（对齐 enrich 试跑口径）。
+        """
+        if not orch.ai_enabled():
+            raise HTTPException(status_code=409, detail="AI enrich is disabled in config (ai.enabled)")
+        try:
+            return orch.aggregate_preview()
+        except EnrichError as exc:
+            # 模型不可达/超时/返回非 JSON：上游失败语义，不泄露凭据（消息已由 llm 层掩码）
+            raise HTTPException(status_code=502, detail=str(exc))
+
+    @app.post("/api/aggregate/run", dependencies=[Depends(auth)])
+    def aggregate_run():
+        """手动聚合一轮（§5.1 v0.40 ② v0.56）：plan + 落盘 draft 概念卡（aggregate stage 写 wiki/）。
+
+        手动路径不受 trigger_mode 与熔断门控；concept_card 任务未配置时返回
+        skipped_reason（200，用户选择非故障）。
+        """
+        try:
+            result = orch.aggregate_run()
+        except EnrichError as exc:
+            # 模型不可达/超时/输出不可解析：上游失败语义收口为 502，不穿透 500
+            raise HTTPException(status_code=502, detail=str(exc))
+        if not result.get("enabled", True):
+            raise HTTPException(status_code=409, detail="AI enrich is disabled in config (ai.enabled)")
+        return result
+
     @app.post("/api/enrich/breaker/reset", dependencies=[Depends(auth)])
     def enrich_breaker_reset():
         """显式恢复自动整理（清零熔断运行态，§5.1 v0.29）——唯一恢复路径。"""
@@ -372,9 +421,19 @@ def create_app(cfg: Config | None = None, orchestrator: Orchestrator | None = No
     # ---------- 工作台与人工处置 API（P5，§6 v0.17） ----------
 
     @app.get("/api/wiki", dependencies=[Depends(auth)])
-    def wiki_list(status: str | None = None):
-        cards = curation.list_cards(guard, status=status)
+    def wiki_list(status: str | None = None, type: str | None = None):
+        # type 过滤（v0.55）：角标/漏斗按 type=summary 计待审单元（1 条目 1 单元）
+        cards = curation.list_cards(guard, status=status, type=type)
         return {"cards": cards, "total": len(cards)}
+
+    @app.post("/api/wiki/batch", dependencies=[Depends(auth)])
+    def wiki_batch(req: dict):
+        # 批量处置（§4.4 v0.55）：items=[{id, action}]，逐条收口不打断整批；
+        # 注册在 /api/wiki/{card_id} 动态路由之前，避免 batch 被当作 card_id
+        items = req.get("items")
+        if not isinstance(items, list) or not items:
+            raise HTTPException(status_code=400, detail="items must be a non-empty list")
+        return curation.batch_cards(guard, items)
 
     @app.get("/api/wiki/{card_id}", dependencies=[Depends(auth)])
     def wiki_detail(card_id: str):

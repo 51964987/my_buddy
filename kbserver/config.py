@@ -62,7 +62,8 @@ DEFAULTS: dict[str, Any] = {
         # 任务分级（§11.5）：各任务独立 provider + model，页面可分别切换；
         # 默认标签/摘要卡均指 ollama 本地；
         # entity_extraction（§9 决策 6 v0.40）：实体抽取（知识图谱），默认 ollama 本地起步；
-        # concept_card：concept 聚合任务槽（v0.40 aggregate stage，第②批接入，届时复用本槽）；
+        # concept_card（v0.56 接入）：concept 聚合（aggregate stage）任务槽，
+        # 默认未配置 = 聚合整体跳过（用户显式配置模型后才执行）；
         # embedding 为向量增强任务槽（§5.1 v0.17）：OpenAI 兼容 /embeddings，
         # 默认仍 glm（本地 Ollama 无 embedding 模型，且 dimensions 口径须与建库时一致）
         "tasks": {

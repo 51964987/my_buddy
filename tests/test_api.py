@@ -36,6 +36,37 @@ def test_wiki_edit_api_status_codes(cfg, guard):
         assert client.put("/api/wiki/w-edit1", json={"body": "  "}).status_code == 400
 
 
+def test_wiki_list_type_filter_and_batch_api(cfg, guard):
+    """GET /api/wiki 增 type 过滤 + POST /api/wiki/batch（v0.55）：待审单元口径与批量处置端点。"""
+    from kbserver import curation
+
+    curation_dir = guard.kb_root / "wiki"
+    curation_dir.mkdir(parents=True, exist_ok=True)
+    (curation_dir / "w-a1.md").write_text(
+        "---\nid: w-a1\ntype: summary\nai_generated: true\nstatus: draft\nsources: [seed1]\n---\n\n# 标题\n\n正文。\n",
+        encoding="utf-8",
+    )
+    (curation_dir / "w-e1.md").write_text(
+        "---\nid: w-e1\ntype: entity\nai_generated: true\nstatus: draft\nsources: [seed1]\n---\n\n# ByteHouse\n\n- 类型：技术\n",
+        encoding="utf-8",
+    )
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        # 待审单元口径：draft 摘要卡 = 1（实体卡不计）
+        assert client.get("/api/wiki?status=draft&type=summary").json()["total"] == 1
+        assert client.get("/api/wiki?status=draft").json()["total"] == 2
+
+        # batch：items 缺失/为空 400；逐条收口——失败条不打断成功条
+        assert client.post("/api/wiki/batch", json={}).status_code == 400
+        assert client.post("/api/wiki/batch", json={"items": []}).status_code == 400
+        r = client.post(
+            "/api/wiki/batch",
+            json={"items": [{"id": "w-a1", "action": "promote"}, {"id": "w-nope", "action": "promote"}]},
+        ).json()
+        assert [x["ok"] for x in r["results"]] == [True, False]
+        assert client.get("/api/wiki/w-a1").json()["status"] == "promoted"
+
+
 def test_capture_and_status_api(cfg, guard):
     cfg.data["pipeline"]["worker_enabled"] = False
     app = create_app(cfg)

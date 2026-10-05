@@ -28,6 +28,7 @@ from datetime import datetime
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
+from . import events
 from .guard import Guard
 from .idgen import collection_page_id
 from .normalize import extract_markdown, normalize_collection_page
@@ -321,6 +322,12 @@ class SyncEngine:
     def get_progress(self, collection_id: str) -> dict:
         return dict(self._progress.get(collection_id) or {})
 
+    def _set_progress(self, collection_id: str, phase: str, done: int, total: int, errors: int) -> None:
+        """进度统一写点：内存态（v0.51 轮询端点）+ 事件总线发布（v0.53 SSE 推送）同源。"""
+        prog = {"phase": phase, "done": done, "total": total, "errors": errors}
+        self._progress[collection_id] = prog
+        events.publish("sync.progress", collection_id=collection_id, **prog)
+
     # ---- collection.json 读写（均经守卫，sync 阶段） ----
 
     def _coll_rel(self, collection_id: str) -> str:
@@ -460,9 +467,15 @@ class SyncEngine:
             coll["sync"]["state"] = "error"
             coll["sync"]["last_error"] = f"{type(exc).__name__}: {exc}"[:500]
             self._write_json(self._coll_rel(collection_id), coll)
-            # v0.51：失败也定格进度（phase=error），前端轮询可见；日志记全堆栈
+            # v0.51：失败也定格进度（phase=error），前端可见；日志记全堆栈
             prog = self._progress.get(collection_id) or {}
-            self._progress[collection_id] = {**prog, "phase": "error"}
+            self._set_progress(
+                collection_id,
+                "error",
+                int(prog.get("done") or 0),
+                int(prog.get("total") or 0),
+                int(prog.get("errors") or 0),
+            )
             logger.error("同步失败：%s %s", collection_id, coll["sync"]["last_error"], exc_info=True)
             raise
         coll["sync"].update(
@@ -498,7 +511,7 @@ class SyncEngine:
         # v0.51：进度初始化（内存态，经 /sync/progress 端点暴露）+ 开始日志
         total = len(page_nodes)
         is_full_fetch = not old_pages
-        self._progress[collection_id] = {"phase": "fetch", "done": 0, "total": total, "errors": 0}
+        self._set_progress(collection_id, "fetch", 0, total, 0)
         logger.info("开始%s：%s 共 %d 页", "首抓" if is_full_fetch else "增量同步", collection_id, total)
         log_every = max(1, total // 10)
 
@@ -526,12 +539,7 @@ class SyncEngine:
                 continue
             finally:
                 # v0.51：逐页推进进度（成功/失败都要走 finally，continue 才不丢计数）
-                self._progress[collection_id] = {
-                    "phase": "fetch",
-                    "done": i + 1,
-                    "total": total,
-                    "errors": len(errors),
-                }
+                self._set_progress(collection_id, "fetch", i + 1, total, len(errors))
                 if (i + 1) % log_every == 0 or i + 1 == total:
                     logger.info(
                         "抓取进度：%s %d/%d（失败 %d）", collection_id, i + 1, total, len(errors)
@@ -564,7 +572,7 @@ class SyncEngine:
         # v0.51：归一化落盘阶段进度（增量同步时归一化才是耗时段）
         norm_targets = added + changed
         norm_total = len(norm_targets)
-        self._progress[collection_id] = {"phase": "normalize", "done": 0, "total": norm_total, "errors": len(errors)}
+        self._set_progress(collection_id, "normalize", 0, norm_total, len(errors))
         if norm_total:
             logger.info("归一化落盘：%s 共 %d 页", collection_id, norm_total)
         norm_log_every = max(1, norm_total // 10)
@@ -603,12 +611,7 @@ class SyncEngine:
                 )
             finally:
                 # v0.51：归一化阶段逐页推进进度与周期日志
-                self._progress[collection_id] = {
-                    "phase": "normalize",
-                    "done": k + 1,
-                    "total": norm_total,
-                    "errors": len(errors),
-                }
+                self._set_progress(collection_id, "normalize", k + 1, norm_total, len(errors))
                 if (k + 1) % norm_log_every == 0 or k + 1 == norm_total:
                     logger.info(
                         "落盘进度：%s %d/%d（失败 %d）", collection_id, k + 1, norm_total, len(errors)
@@ -633,7 +636,7 @@ class SyncEngine:
         self._write_json(self._toc_rel(collection_id), toc)
 
         # v0.51：完成态进度 + 完成汇总日志（added/changed/removed/errors 一次说清）
-        self._progress[collection_id] = {"phase": "done", "done": total, "total": total, "errors": len(errors)}
+        self._set_progress(collection_id, "done", total, total, len(errors))
         logger.info(
             "同步完成：%s 页面 %d（added=%d changed=%d removed=%d errors=%d outcomes=%s）",
             collection_id, len(new_pages), len(added), len(changed), len(removed), len(errors), outcomes,

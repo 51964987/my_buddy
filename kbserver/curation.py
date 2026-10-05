@@ -63,7 +63,7 @@ def _card_summary(guard: Guard, card, fm: dict, body: str) -> dict:
     }
 
 
-def list_cards(guard: Guard, status: str | None = None) -> list[dict]:
+def list_cards(guard: Guard, status: str | None = None, type: str | None = None) -> list[dict]:
     out = []
     for card in _iter_cards(guard):
         try:
@@ -71,6 +71,8 @@ def list_cards(guard: Guard, status: str | None = None) -> list[dict]:
         except Exception:
             continue  # 人工编辑中的半成品跳过，不阻塞清单
         if status and str(fm.get("status") or "") != status:
+            continue
+        if type and str(fm.get("type") or "") != type:
             continue
         out.append(_card_summary(guard, card, fm, body))
     return out
@@ -133,6 +135,43 @@ def edit_card(guard: Guard, card_id: str, body: str) -> dict:
     )
     guard.write_text("curation", rel, text)
     return {"card_id": card_id, "rel": rel, "edited_at": updated["edited_at"]}
+
+
+BATCH_ACTIONS = {"promote", "regenerate", "delete"}
+BATCH_LIMIT = 200  # 单请求上限：本地单用户批量勾选场景足够，防御误传超大全量
+
+
+def batch_cards(guard: Guard, items: list) -> dict:
+    """批量处置（§4.4 v0.55）：逐条收口——单条异常记入该条 result，不打断整批。
+
+    审核台按条目聚合（v0.55）后，组级/跨组批量操作把组内各卡的处置打包成
+    items=[{id, action}] 一次下发；语义与单卡三处置完全一致（复用同一实现）。
+    """
+    results = []
+    for item in items[:BATCH_LIMIT]:
+        if not isinstance(item, dict):
+            results.append({"id": "", "action": "", "ok": False, "error": "item must be an object"})
+            continue
+        cid = str(item.get("id") or "")
+        action = str(item.get("action") or "")
+        try:
+            if not cid:
+                raise ValueError("missing card id")
+            if action not in BATCH_ACTIONS:
+                raise ValueError(f"invalid action: {action or '(empty)'}")
+            if action == "promote":
+                if not promote_card(guard, cid):
+                    raise KeyError(cid)  # 不存在或非 draft
+                results.append({"id": cid, "action": action, "ok": True})
+            elif action == "delete":
+                delete_card(guard, cid)
+                results.append({"id": cid, "action": action, "ok": True})
+            else:  # regenerate
+                r = regenerate_card(guard, cid)
+                results.append({"id": cid, "action": action, "ok": True, "reset_sources": r["reset_sources"]})
+        except Exception as exc:  # 逐条收口（铁律 3 批量口径）：失败详情进 result，不打断整批
+            results.append({"id": cid, "action": action, "ok": False, "error": str(exc)})
+    return {"results": results, "total": len(results)}
 
 
 def regenerate_card(guard: Guard, card_id: str) -> dict:

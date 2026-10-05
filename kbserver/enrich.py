@@ -5,7 +5,8 @@
 - summary_card：摘要卡（强模型）→ `wiki/` draft 卡，摘要同时回写 frontmatter `ai.*`；
 - entity_extraction（§9 决策 6 v0.40）：实体抽取（知识图谱）→ `wiki/` 实体卡，
   受 `ai.kg` schema 白名单约束，同名确定性合并；只写 wiki/，不回写源条目；
-- concept_card：concept 聚合任务槽（aggregate stage，第②批接入，届时复用本槽）。
+- concept_card（v0.56 接入）：concept 聚合（aggregate stage）→ `wiki/` 概念卡，
+  输入 = 实体卡 + enriched 条目，同名确定性合并；复用本任务槽。
 
 写边界：卡片产物只写 `wiki/`；对源条目仅经守卫补丁通道写 `tags`/`ai` 两字段
 （status 由编排器以独立的 state 补丁通道维护）。失败抛 EnrichError，
@@ -36,6 +37,8 @@ MAX_CONTENT_CHARS = 6000
 MAX_TAGS = 8
 # 单条目实体抽取上限（§5.1 v0.40）：控成本 + 防低质长尾
 MAX_ENTITIES = 12
+# 单轮概念聚合产出上限（§5.1 v0.56）：概念是跨来源的二级聚合，宁缺毋滥
+MAX_CONCEPTS = 8
 
 TAGS_WHITELIST = {"tags", "ai"}
 STATUS_WHITELIST = {"status"}
@@ -56,15 +59,71 @@ _CARD_PROMPT = (
 )
 
 # 实体抽取（§9 决策 6 v0.40）：受控 schema——类型/关系都必须落在白名单内，
-# 防实体爆炸与幻觉（GraphRAG/Neo4j Graph Builder 的共识做法）
+# 防实体爆炸与幻觉（GraphRAG/Neo4j Graph Builder 的共识做法）。
+# v0.54 强化：小模型会把 JSON 示例里的占位词当实体复读（实测 minicpm5 产出
+# 「产品名/人物名/地点名」等 8 张模板卡），prompt 明确禁止并配合代码侧名称校验。
 _ENTITY_PROMPT = (
     "你是知识库抽取助手。从下面的内容中抽取实体与实体间关系。\n"
     "实体类型只能是：{entity_types}；关系类型只能是：{relation_types}。"
-    "只抽文中明确出现的事物，最多 {max_entities} 个实体；关系两端必须是抽出的实体。"
+    "只抽文中明确出现的**具体**事物名称（如具体的产品、技术、组织、人物的名字），"
+    "最多 {max_entities} 个实体；关系两端必须是抽出的实体。\n"
+    "重要：占位词不是实体——「实体名」「产品名」「人物名」这类示例模板词、泛称一律不要输出；"
+    "文中没有符合条件的实体就给空数组，不要编造。"
     '只输出一个 JSON 对象：{{"entities": [{{"name": "实体名", "type": "实体类型", '
     '"aliases": ["别名，可省略"]}}], "relations": [{{"source": "实体名", '
     '"type": "关系类型", "target": "实体名"}}]}}，不要输出其他文字。\n\n'
     "标题：{title}\n\n内容：\n{content}"
+)
+
+# 实体名质量黑名单（v0.54 机械防线）：常见占位词/泛称，即使模型复读也不入库。
+# 用精确集合而非子串匹配，避免误伤真实实体（如「产品名单」不受影响——该防线只作用于实体名）。
+_TEMPLATE_ENTITY_NAMES = frozenset(
+    {
+        "实体名", "产品名", "人物名", "人名", "地点名", "地名", "位置名",
+        "组织名", "机构名", "公司名", "团队名", "技术名", "概念名", "工具名",
+        "事件名", "事件", "时间", "日期", "示例",
+    }
+)
+
+
+def is_bad_entity_name(name: str, etype: str) -> bool:
+    """实体名合理性校验（v0.54 机械防线，§5.1 实施口径）：
+
+    模板词 / 与实体类型同名 / 长度不足 2（单字）→ 不可入库。
+    模型侧有 prompt 禁令（_ENTITY_PROMPT v0.54 强化），此处是代码侧最后防线
+    ——schema 强校验管类型合法性，管不住「复读示例」这类语义垃圾。
+    """
+    name = name.strip()
+    if not name or name in _TEMPLATE_ENTITY_NAMES:
+        return True
+    if name == etype.strip():
+        return True
+    return len(name) < 2
+
+
+def _is_bad_entity_alias(alias: str) -> bool:
+    """别名合理性校验（v0.54）：含模板词的别名丢弃（实测小模型产出「产品名，可省略」）。
+
+    别名允许子串匹配（模板词出现在别名里基本就是复读），实体名用精确匹配。
+    """
+    return any(t in alias for t in _TEMPLATE_ENTITY_NAMES)
+
+
+# 概念聚合 prompt（§5.1 v0.40 ②，v0.56 落地）：输入 = 实体卡 + enriched 条目清单，
+# LLM 聚类产出概念。与实体抽取同一纪律：引用只能来自给定清单、无概念给空数组
+# 不编造、禁止占位词标题（配合代码侧 _is_bad_entity_name 校验）。
+_CONCEPT_PROMPT = (
+    "你是知识库整理助手。下面给出知识库中已抽取的实体卡清单与已整理条目清单。\n"
+    "请把它们聚类成若干「概念」：概念是对一组相关实体/条目的主题概括（如某项技术、某个领域），"
+    "要综合多个来源，不是对单个实体的复述。\n"
+    "约束：最多 {max_concepts} 个概念；entity_refs（实体名）与 entry_refs（条目id）只能从给定清单中选，"
+    "两者至少填一个；没有合适的概念就给空数组，不要编造；标题要具体（如「列式存储与 MergeTree」），"
+    "禁止「概念一」「主题」这类占位词。\n"
+    '只输出一个 JSON 对象：{{"concepts": [{{"title": "概念标题", "summary": "两三句话概括", '
+    '"card": "wiki 卡正文（Markdown，不要一级标题，400 字以内）", "entity_refs": ["实体名"], '
+    '"entry_refs": ["条目id"], "confidence": 0到1之间的小数}}]}}，不要输出其他文字。\n\n'
+    "实体卡清单（名称 | 类型 | 别名 | 来源条目数）：\n{entities}\n\n"
+    "条目清单（id | 标题 | AI摘要）：\n{entries}"
 )
 
 
@@ -98,6 +157,14 @@ def _parse_json_block(text: str):
             except ValueError:
                 continue
     raise EnrichError(f"model returned non-JSON reply: {text[:120]}")
+
+
+def concept_card_id(title: str) -> str:
+    """概念卡确定性 id（§4.5 v0.40，v0.56 落地）：w- + SHA-1(concept:标题小写) 前 12 位。
+
+    同名即同卡：重跑幂等覆盖合并，与实体卡同一确定性根基。
+    """
+    return "w-" + hashlib.sha1(f"concept:{title.strip().lower()}".encode("utf-8")).hexdigest()[:12]
 
 
 def wiki_card_id(entry_id: str, card_type: str = "summary") -> str:
@@ -160,7 +227,7 @@ class Enricher:
         entity_types = [t for t in _as_str_list(kg_cfg.get("entity_types"))]
         relation_types = set(_as_str_list(kg_cfg.get("relation_types")))
         if not entity_types:
-            return {"entities": [], "relations": []}
+            return {"entities": [], "relations": [], "discarded": 0}
         raw = self._chat(
             "entity_extraction",
             _ENTITY_PROMPT.format(
@@ -177,6 +244,7 @@ class Enricher:
 
         entities: list[dict] = []
         by_name: dict[str, dict] = {}
+        discarded = 0  # v0.54：名称质量校验丢弃数（可观测，进 plan）
         for item in obj.get("entities") or []:
             if not isinstance(item, dict) or len(entities) >= MAX_ENTITIES:
                 continue
@@ -184,9 +252,12 @@ class Enricher:
             etype = str(item.get("type") or "").strip()
             if not name or etype not in entity_types or name.lower() in by_name:
                 continue
+            if is_bad_entity_name(name, etype):
+                discarded += 1
+                continue
             aliases = []
             for a in _as_str_list(item.get("aliases")):
-                if a and a != name and a not in aliases:
+                if a and a != name and a not in aliases and not _is_bad_entity_alias(a):
                     aliases.append(a)
             ent = {"name": name, "type": etype, "aliases": aliases, "card_id": entity_card_id(name)}
             entities.append(ent)
@@ -207,7 +278,7 @@ class Enricher:
                 continue
             seen.add(key)
             relations.append({"source": src["name"], "type": rtype, "target": dst["name"]})
-        return {"entities": entities, "relations": relations}
+        return {"entities": entities, "relations": relations, "discarded": discarded}
 
     def plan_entry(self, note_rel: str) -> dict:
         """调模型 + 解析，返回结构化结果；**零落盘**（§5.1 v0.29 试跑口径）。
@@ -269,6 +340,7 @@ class Enricher:
             "card_id": wiki_card_id(entry_id, "summary"),
             "entities": kg["entities"],
             "relations": kg["relations"],
+            "entities_discarded": kg["discarded"],
             "entity_model": entity_model,
             "entity_base_url": entity_base_url,
             "provider": str(self.cfg.data.get("ai", {}).get("tasks", {}).get("summary_card", {}).get("provider", "")),
@@ -338,6 +410,7 @@ class Enricher:
             "outcome": "enriched",
             "wiki_card": card_rel,
             "entity_cards": entity_rels,
+            "entities_discarded": plan.get("entities_discarded", 0),
             "tags": updated_fm.get("tags", []),
         }
 
@@ -426,3 +499,215 @@ class Enricher:
             + "\n".join(lines)
             + "\n"
         )
+
+    # ---------- 概念聚合（§5.1 v0.40 ②，v0.56 落地：aggregate stage） ----------
+
+    def _collect_concept_inputs(self) -> dict:
+        """收集聚合输入（只读）：wiki/ 实体卡 + enriched 条目（id/title/ai.summary/url）。"""
+        entities: dict[str, dict] = {}  # 实体名小写 → 卡信息
+        entity_cards: list[dict] = []
+        wiki = self.guard.kb_root / "wiki"
+        if wiki.is_dir():
+            for card in sorted(wiki.rglob("*.md")):
+                try:
+                    fm, _ = split_note(card.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if str(fm.get("type") or "") != "entity":
+                    continue
+                info = {
+                    "card_id": str(fm.get("id") or ""),
+                    "name": str(fm.get("name") or ""),
+                    "type": str(fm.get("entity_type") or ""),
+                    "aliases": _as_str_list(fm.get("aliases")),
+                    "sources": _as_str_list(fm.get("sources")),
+                }
+                entity_cards.append(info)
+                if info["name"]:
+                    entities[info["name"].lower()] = info
+        entries: dict[str, dict] = {}
+        for region in ("sources", "collections"):
+            root = self.guard.kb_root / region
+            if not root.is_dir():
+                continue
+            for note in sorted(root.rglob("note.md")):
+                try:
+                    fm, _ = split_note(note.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if fm.get("status") != "enriched":
+                    continue
+                eid = str(fm.get("id") or "")
+                if not eid:
+                    continue
+                ai = fm.get("ai") if isinstance(fm.get("ai"), dict) else {}
+                entries[eid] = {
+                    "id": eid,
+                    "title": str(fm.get("title") or eid),
+                    "summary": str((ai or {}).get("summary") or "")[:200],
+                    "url": str(fm.get("url") or "").strip(),
+                }
+        return {"entities": entities, "entity_cards": entity_cards, "entries": entries}
+
+    def plan_concept(self) -> dict:
+        """概念聚合并解析，**零落盘**（与 enrich 试跑同一拆分口径，§5.1 v0.56）。
+
+        `concept_card` 任务未配置 provider = 聚合整体跳过（返回 skipped 标记，
+        不计熔断——未配置是用户选择，不是故障）。
+        """
+        started = time.perf_counter()
+        task_cfg = (self.cfg.data.get("ai", {}).get("tasks") or {}).get("concept_card") or {}
+        if not task_cfg.get("provider"):
+            return {"skipped": "concept_card_not_configured"}
+
+        inputs = self._collect_concept_inputs()
+        if not inputs["entity_cards"] and not inputs["entries"]:
+            # 无可聚合输入 = 无目标（对齐 enrich「无目标不参与熔断判定」口径）：
+            # 是库状态而非故障，返回 skipped 而非抛错（避免空库时 run 穿透成 500）
+            return {"skipped": "nothing_to_aggregate"}
+        ent_lines = [
+            f"{e['name']} | {e['type']} | {'、'.join(e['aliases']) or '—'} | {len(e['sources'])}"
+            for e in inputs["entity_cards"]
+        ]
+        entry_lines = [
+            f"{e['id']} | {e['title']} | {e['summary'] or '—'}" for e in inputs["entries"].values()
+        ]
+        raw = self._chat(
+            "concept_card",
+            _CONCEPT_PROMPT.format(
+                max_concepts=MAX_CONCEPTS,
+                entities="\n".join(ent_lines) or "（无）",
+                entries="\n".join(entry_lines) or "（无）",
+            ),
+        )
+        obj = _parse_json_block(raw)
+        if not isinstance(obj, dict):
+            raise EnrichError("concept reply is not a JSON object")
+
+        concepts: list[dict] = []
+        seen_titles: set[str] = set()
+        discarded = 0
+        for item in obj.get("concepts") or []:
+            if not isinstance(item, dict) or len(concepts) >= MAX_CONCEPTS:
+                continue
+            title = str(item.get("title") or "").strip()
+            if not title or is_bad_entity_name(title, "") or title.lower() in seen_titles:
+                discarded += 1
+                continue
+            # 引用强校验：实体按名称解析到实体卡 id，条目按 id 校验存在性；
+            # 无效引用丢弃（不静默编造溯源），双空引用的概念整体丢弃
+            entity_ids: list[str] = []
+            for name in _as_str_list(item.get("entity_refs")):
+                info = inputs["entities"].get(name.lower())
+                if info and info["card_id"] not in entity_ids:
+                    entity_ids.append(info["card_id"])
+            entry_ids: list[str] = []
+            for eid in _as_str_list(item.get("entry_refs")):
+                if eid in inputs["entries"] and eid not in entry_ids:
+                    entry_ids.append(eid)
+            if not entity_ids and not entry_ids:
+                discarded += 1
+                continue
+            summary = str(item.get("summary") or "").strip()
+            body = str(item.get("card") or "").strip() or summary
+            if not body:
+                discarded += 1
+                continue
+            confidence = None
+            raw_conf = item.get("confidence")
+            if isinstance(raw_conf, (int, float)) and 0.0 <= float(raw_conf) <= 1.0:
+                confidence = round(float(raw_conf), 2)
+            seen_titles.add(title.lower())
+            concepts.append(
+                {
+                    "title": title,
+                    "card_id": concept_card_id(title),
+                    "summary": summary,
+                    "card_body": body,
+                    "entity_card_ids": entity_ids,
+                    "entry_ids": entry_ids,
+                    "confidence": confidence,
+                }
+            )
+
+        resolved = resolve_task(self.cfg.data.get("ai", {}), "concept_card")
+        return {
+            "concepts": concepts,
+            "discarded": discarded,
+            "inputs": {"entities": len(inputs["entity_cards"]), "entries": len(inputs["entries"])},
+            "entry_urls": {eid: e["url"] for eid, e in inputs["entries"].items() if e["url"]},
+            "model": resolved["model"],
+            "base_url": resolved["base_url"],
+            "elapsed_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+    def run_concept(self, plan: dict) -> dict:
+        """概念卡落盘（守卫 stage `aggregate`，只写 wiki/）：幂等覆盖合并。
+
+        合并语义同实体卡：status 沿用既有（promoted 不降级）、sources 并集去重
+        （本轮 entry_refs + 被引实体卡的来源条目）、created_at 保留首次、confidence
+        非法不写字段。试跑与执行共用 plan——差异只在落盘这一步。
+        """
+        written: list[dict] = []
+        for c in plan["concepts"]:
+            rel = f"wiki/{c['card_id']}.md"
+            path = self.guard.kb_root.joinpath(*rel.split("/"))
+            old_fm: dict = {}
+            if path.exists():
+                old_fm, _ = split_note(path.read_text(encoding="utf-8"))
+            # 溯源并集：本轮条目引用 + 被引实体卡的来源条目（概念经实体间接溯源）
+            sources: list[str] = list(c["entry_ids"])
+            for cid in c["entity_card_ids"]:
+                ent_rel = f"wiki/{cid}.md"
+                ent_path = self.guard.kb_root.joinpath(*ent_rel.split("/"))
+                if ent_path.exists():
+                    try:
+                        ent_fm, _ = split_note(ent_path.read_text(encoding="utf-8"))
+                        sources.extend(_as_str_list(ent_fm.get("sources")))
+                    except Exception:
+                        continue
+            sources = list(dict.fromkeys([*_as_str_list(old_fm.get("sources")), *sources]))
+            status = old_fm.get("status") if old_fm.get("status") in ("draft", "promoted") else "draft"
+            fm: dict = {
+                "id": c["card_id"],
+                "type": "concept",
+                "ai_generated": True,
+                "status": status,
+                "sources": sources,
+                "created_at": str(old_fm.get("created_at") or _now_iso()),
+                "model": plan["model"],
+            }
+            if c["confidence"] is not None:
+                fm["confidence"] = c["confidence"]
+            elif "confidence" in old_fm:
+                fm["confidence"] = old_fm["confidence"]
+            body = c["card_body"]
+            first_line = body.lstrip().splitlines()[0] if body.strip() else ""
+            heading = "" if first_line.startswith("# ") else f"# {c['title']}\n\n"
+            text = (
+                "---\n"
+                + yaml.safe_dump(fm, allow_unicode=True, sort_keys=False)
+                + "---\n\n"
+                + heading
+                + body
+                + "\n\n"
+                + self._concept_source_lines(sources, plan.get("entry_urls") or {})
+            )
+            self.guard.write_text("aggregate", rel, text)
+            written.append(
+                {"rel": rel, "id": c["card_id"], "title": c["title"], "sources": len(sources), "status": status}
+            )
+        return {
+            "concepts": plan["concepts"],
+            "written": written,
+            "discarded": plan.get("discarded", 0),
+            "model": plan["model"],
+            "base_url": plan["base_url"],
+            "elapsed_ms": plan["elapsed_ms"],
+        }
+
+    @staticmethod
+    def _concept_source_lines(sources: list[str], urls: dict[str, str]) -> str:
+        """概念卡来源行（§4.5 纪律）：逐条列出，有 url 写可点链接，无降级纯文本。"""
+        lines = [f"> 来源：[{sid}]({urls[sid]})" if sid in urls else f"> 来源条目：{sid}" for sid in sources]
+        return "\n".join(lines)

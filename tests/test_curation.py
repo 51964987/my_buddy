@@ -26,10 +26,10 @@ def _seed_note(guard, entry_id="seed0001", status="enriched", meta=None):
     return rel
 
 
-def _make_card(guard, card_id, sources, status="draft", body="# 摘要卡标题\n\n要点内容。"):
+def _make_card(guard, card_id, sources, status="draft", body="# 摘要卡标题\n\n要点内容。", card_type="summary"):
     fm = {
         "id": card_id,
-        "type": "summary",
+        "type": card_type,
         "ai_generated": True,
         "status": status,
         "sources": sources,
@@ -64,6 +64,79 @@ def test_list_and_detail_with_ai_markers(cfg, guard):
     detail = curation.get_card(guard, "w-a1")
     assert "要点内容" in detail["body"]
     assert curation.get_card(guard, "w-nope") is None
+
+
+def test_list_cards_type_filter(cfg, guard):
+    """type 过滤（v0.55）：角标/漏斗按 type=summary 计待审单元（1 条目 1 单元）。"""
+    _make_card(guard, "w-a1", ["seed0001"])
+    _make_card(guard, "w-e1", ["seed0001"], card_type="entity", body="# ByteHouse\n\n- 类型：技术")
+
+    summaries = curation.list_cards(guard, type="summary")
+    assert [c["id"] for c in summaries] == ["w-a1"]
+    entities = curation.list_cards(guard, type="entity")
+    assert [c["id"] for c in entities] == ["w-e1"]
+    # 组合过滤：draft 摘要卡 = 待审单元数
+    assert [c["id"] for c in curation.list_cards(guard, status="draft", type="summary")] == ["w-a1"]
+    assert [c["id"] for c in curation.list_cards(guard, status="draft", type="entity")] == ["w-e1"]
+
+
+def test_batch_cards_promote_and_delete(cfg, guard):
+    """批量处置（v0.55）：语义与单卡三处置一致（复用同一实现）。"""
+    _make_card(guard, "w-a1", ["seed0001"])
+    _make_card(guard, "w-e1", ["seed0001"], card_type="entity", body="# ByteHouse\n\n- 类型：技术")
+    _make_card(guard, "w-e2", ["seed0001"], status="promoted", card_type="entity", body="# 已晋升实体")
+
+    result = curation.batch_cards(
+        guard,
+        [
+            {"id": "w-a1", "action": "promote"},
+            {"id": "w-e1", "action": "delete"},
+            {"id": "w-e2", "action": "promote"},  # promoted 不可再晋升 → 单条失败
+        ],
+    )
+    assert result["total"] == 3
+    assert [r["ok"] for r in result["results"]] == [True, True, False]
+    assert curation.get_card(guard, "w-a1")["status"] == "promoted"
+    assert curation.get_card(guard, "w-e1") is None
+    assert curation.get_card(guard, "w-e2")["status"] == "promoted"  # 不降级
+
+
+def test_batch_cards_per_item_errors_do_not_abort(cfg, guard):
+    """逐条收口（铁律 3 批量口径）：单条异常记入该条 result，不打断整批。"""
+    _make_card(guard, "w-a1", ["seed0001"])
+
+    result = curation.batch_cards(
+        guard,
+        [
+            {"id": "w-nope", "action": "promote"},  # 不存在
+            {"id": "w-a1", "action": "bogus"},  # 非法 action
+            {"id": "", "action": "promote"},  # 缺 id
+            {"id": "w-a1", "action": "promote"},  # 合法，排最后仍执行
+        ],
+    )
+    assert [r["ok"] for r in result["results"]] == [False, False, False, True]
+    assert curation.get_card(guard, "w-a1")["status"] == "promoted"
+
+
+def test_batch_cards_redo_group_composition(cfg, guard):
+    """整条打回的组合语义（前端打包、后端逐条执行）：摘要卡打回复位源条目 + draft 实体卡删除。"""
+    _seed_note(guard, "seed0001", status="enriched")
+    _make_card(guard, "w-a1", ["seed0001"])
+    _make_card(guard, "w-e1", ["seed0001"], card_type="entity", body="# ByteHouse\n\n- 类型：技术")
+
+    result = curation.batch_cards(
+        guard,
+        [{"id": "w-a1", "action": "regenerate"}, {"id": "w-e1", "action": "delete"}],
+    )
+    assert all(r["ok"] for r in result["results"])
+    assert result["results"][0]["reset_sources"] == ["seed0001"]
+    assert curation.get_card(guard, "w-a1") is None
+    assert curation.get_card(guard, "w-e1") is None
+    from kbserver.frontmatter import split_note
+
+    note = guard.kb_root.joinpath(*"sources/web/2026/seed0001/note.md".split("/"))
+    fm, _ = split_note(note.read_text(encoding="utf-8"))
+    assert fm["status"] == "normalized"
 
 
 def test_promote_only_from_draft(cfg, guard):

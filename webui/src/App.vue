@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /** 工作台布局：左侧主导航（折叠/展开，偏好存浏览器本地，§11.7）+ 内容区。 */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from './api'
+import { subscribeEvents } from './sse'
 
 const collapsed = ref(localStorage.getItem('kb_sidebar_collapsed') === '1')
-const curationTodo = ref(0) // 审核台待办：draft 卡数（折叠态红点、展开态数字）
+const curationTodo = ref(0) // 审核台待办：待审单元数（draft 摘要卡，1 条目 1 单元；v0.55 口径）
 const route = useRoute()
 
 const navs = [
@@ -25,14 +26,41 @@ function toggleCollapse() {
 
 async function refreshBadge() {
   try {
-    const data = await api.get<{ total: number }>('/api/wiki?status=draft')
+    const data = await api.get<{ total: number }>('/api/wiki?status=draft&type=summary')
     curationTodo.value = data.total
   } catch {
     curationTodo.value = 0 // 未配置 token 等场景不渲染角标
   }
 }
 
-onMounted(refreshBadge)
+// SSE 实时角标（v0.56，修 v0.53 漏接）：写盘事件 → debounce 重拉角标（§11.8 ⑥
+// 推送触发刷新同口径，业界 badge 通行做法）；重连（_reconnected）直接重拉兜底。
+// 路由切换与页面内操作 emit（refresh-badge）刷新保留——三通道互补。
+let badgeTimer: number | null = null
+let unsubSse: (() => void) | null = null
+
+function scheduleBadgeRefresh() {
+  if (badgeTimer !== null) window.clearTimeout(badgeTimer)
+  badgeTimer = window.setTimeout(() => {
+    badgeTimer = null
+    void refreshBadge()
+  }, 500)
+}
+
+onMounted(() => {
+  void refreshBadge()
+  unsubSse = subscribeEvents(['kb.changed', '_reconnected'], (ev) => {
+    if (ev.type === '_reconnected') void refreshBadge()
+    else scheduleBadgeRefresh()
+  })
+})
+
+onBeforeUnmount(() => {
+  unsubSse?.()
+  unsubSse = null
+  if (badgeTimer !== null) window.clearTimeout(badgeTimer)
+})
+
 watch(() => route.path, refreshBadge)
 
 const pageTitle = computed(() => (route.meta.title as string) ?? '')

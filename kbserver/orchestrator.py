@@ -374,6 +374,8 @@ class Orchestrator:
             return self._empty_summary("breaker_open")
         summary = self.enrich_scan_once()
         self._update_breaker(summary)
+        # 二级聚合（§5.1 v0.40 ②，v0.56）：enrich 批次后执行，门控/熔断同口径
+        summary["aggregate"] = self.aggregate_auto_once()
         return summary
 
     def _update_breaker(self, summary: dict) -> None:
@@ -511,6 +513,69 @@ class Orchestrator:
                 f"entry status is '{fm.get('status')}', only normalized/error can be enriched"
             )
         return self.enricher.plan_entry(note_rel)
+
+    # ---------- 概念聚合（§5.1 v0.40 ②，v0.56 落地：aggregate stage） ----------
+
+    def _breaker_fail(self, message: str) -> None:
+        """聚合轮失败记账：与 enrich 熔断共用同一运行态（state/consecutive_failures），
+        失败口径一致——整轮无成功累计、达阈值置 open、open 后不再重复记账。"""
+        if self._breaker_open():
+            return
+        failures = int(self._breaker().get("consecutive_failures") or 0) + 1
+        fields: dict = {"consecutive_failures": failures}
+        threshold = max(1, int(self.cfg.data.get("ai", {}).get("breaker_threshold", 3) or 3))
+        if failures >= threshold:
+            fields.update(
+                state="open",
+                opened_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+                last_error=message[:500],
+            )
+        self.cfg.write_breaker(**fields)
+
+    def _breaker_success(self) -> None:
+        """聚合轮成功：有失败累计则清零（对齐 enrich「任一轮有成功清零」）。"""
+        if int(self._breaker().get("consecutive_failures") or 0):
+            self.cfg.write_breaker(consecutive_failures=0)
+
+    def aggregate_preview(self) -> dict:
+        """概念聚合试跑（零落盘）：直接返回 plan，不写 wiki/（§5.1 v0.56）。
+
+        手动路径不受 trigger_mode 与熔断门控；ai.enabled 总闸由 API 层校验。
+        """
+        return self.enricher.plan_concept()
+
+    def aggregate_run(self) -> dict:
+        """手动聚合一轮（plan + 落盘），不受 trigger_mode 与熔断门控。"""
+        if not self.ai_enabled():
+            return {"enabled": False}
+        plan = self.enricher.plan_concept()
+        if plan.get("skipped"):
+            return {"enabled": True, "skipped_reason": plan["skipped"]}
+        result = self.enricher.run_concept(plan)
+        return {"enabled": True, **result}
+
+    def aggregate_auto_once(self) -> dict:
+        """auto 轮在 enrich 批次后调用（§5.1 ②）：门控同 enrich，失败计入熔断。
+
+        concept_card 任务未配置 = 跳过（用户选择，不计熔断——与实体空白名单
+        跳过同口径）；聚合失败（模型不可达/输出不可解析）按整轮失败记账。
+        """
+        if not self.ai_enabled() or self._trigger_mode() != "auto" or self._breaker_open():
+            return {"skipped_reason": "gated"}
+        try:
+            plan = self.enricher.plan_concept()
+        except EnrichError as exc:
+            self._breaker_fail(str(exc))
+            return {"error": str(exc)}
+        if plan.get("skipped"):
+            return {"skipped_reason": plan["skipped"]}
+        try:
+            result = self.enricher.run_concept(plan)
+        except Exception as exc:
+            self._breaker_fail(f"{type(exc).__name__}: {exc}")
+            return {"error": f"{type(exc).__name__}: {exc}"}
+        self._breaker_success()
+        return result
 
     def rerun_enrich(self, entry_id: str) -> bool:
         """enrich error 条目复活：重置回 normalized 并清零重试计数。"""

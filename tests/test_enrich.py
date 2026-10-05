@@ -398,6 +398,36 @@ def test_entity_schema_enforced(cfg, guard):
     assert fm["relations"] == [{"type": "相关", "target": entity_card_id("好实体"), "name": "好实体"}]
 
 
+def test_entity_name_sanity_rejects_template_parroting(cfg, guard):
+    """实体名质量校验（v0.54 机械防线，§5.1）：模板词/与类型同名/单字名丢弃，
+    含模板词的别名过滤——防小模型复读 prompt 示例占位词入库
+    （实测 minicpm5 产出「产品名/人物名/地点名」等 8 张模板卡）。"""
+    from kbserver.enrich import Enricher, entity_card_id
+
+    reply = json.dumps(
+        {
+            "entities": [
+                {"name": "产品名", "type": "产品", "aliases": []},  # 模板占位词
+                {"name": "概念", "type": "概念", "aliases": []},  # 与实体类型同名
+                {"name": "云", "type": "概念", "aliases": []},  # 单字（长度不足 2）
+                {"name": "ByteHouse", "type": "产品", "aliases": ["产品名，可省略", "BH"]},  # 正常实体
+            ],
+            "relations": [],
+        },
+        ensure_ascii=False,
+    )
+    enricher = Enricher(cfg, guard, client_factory=FakeLLM(replies={"entity_extraction": reply}))
+    rel = _seed_note(guard)
+    result = enricher.enrich_entry(rel)
+
+    assert not (guard.kb_root / "wiki" / f"{entity_card_id('产品名')}.md").exists()
+    assert not (guard.kb_root / "wiki" / f"{entity_card_id('概念')}.md").exists()
+    assert not (guard.kb_root / "wiki" / f"{entity_card_id('云')}.md").exists()
+    fm = _fm(guard.kb_root / "wiki" / f"{entity_card_id('ByteHouse')}.md")
+    assert fm["aliases"] == ["BH"]  # 含模板词的别名被过滤，真实别名保留
+    assert result["entities_discarded"] == 3
+
+
 def test_entity_merge_idempotent(cfg, guard):
     """同名确定性合并（§4.5 v0.40）：两个条目抽到同一实体 → 同一张卡，
     sources/aliases/relations 并集去重，created_at 保留首次。"""

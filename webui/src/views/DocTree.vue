@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { api, type TocDir, type TocPage } from '../api'
 import { buildDocxFromMarkdown, buildMarkdown, downloadBlob, exportFilename, type ExportNode } from '../exporters'
 import { renderMarkdown } from '../markdown'
+import { subscribeEvents } from '../sse'
 import PopoverMenu from '../PopoverMenu.vue'
 
 interface CollectionItem {
@@ -139,14 +140,14 @@ async function select(id: string) {
     if (msg.includes('首抓')) {
       tocNotice.value = msg
       tree.value = []
-      startPoll(id)
+      startWatch(id)
     } else {
       error.value = msg
     }
   }
 }
 
-// ---------- 首抓/同步实时进度轮询（§6 v0.51） ----------
+// ---------- 首抓/同步实时进度（v0.51 轮询 → v0.53 SSE 优先 + 轮询兜底） ----------
 interface SyncProgress {
   phase: 'fetch' | 'normalize' | 'done' | 'error' | string
   done: number
@@ -155,6 +156,8 @@ interface SyncProgress {
 }
 const syncProgress = ref<SyncProgress | null>(null)
 let pollTimer: number | null = null
+let sseUnsub: (() => void) | null = null
+let watchedId: string | null = null
 
 function stopPoll() {
   if (pollTimer !== null) {
@@ -163,32 +166,63 @@ function stopPoll() {
   }
 }
 
+function stopWatch() {
+  stopPoll()
+  sseUnsub?.()
+  sseUnsub = null
+  watchedId = null
+}
+
+/** 进度事件统一处理（SSE 与轮询同源 /api 口径） */
+async function handleProgress(id: string, p: SyncProgress) {
+  if (!p || !p.phase) return // 尚未进入抓取循环（如排队中）
+  syncProgress.value = p
+  if (p.phase === 'done') {
+    stopWatch()
+    syncing.value = false
+    tocNotice.value = `首抓完成：共 ${p.total} 页（失败 ${p.errors}）`
+    await select(id) // 完成即自动加载目录树
+    await loadCollections()
+  } else if (p.phase === 'error') {
+    stopWatch()
+    syncing.value = false
+    error.value = '首抓失败：详情见服务日志（logs/kbserver.log）'
+  }
+}
+
 function startPoll(id: string) {
   stopPoll()
   pollTimer = window.setInterval(async () => {
     try {
       const r = await api.get<{ progress: SyncProgress | null }>(`/api/collections/${id}/sync/progress`)
-      const p = r.progress
-      if (!p || !p.phase) return // 尚未进入抓取循环（如排队中），下一轮再看
-      syncProgress.value = p
-      if (p.phase === 'done') {
-        stopPoll()
-        syncing.value = false
-        tocNotice.value = `首抓完成：共 ${p.total} 页（失败 ${p.errors}）`
-        await select(id) // 完成即自动加载目录树
-        await loadCollections()
-      } else if (p.phase === 'error') {
-        stopPoll()
-        syncing.value = false
-        error.value = '首抓失败：详情见服务日志（logs/kbserver.log）'
-      }
+      await handleProgress(id, r.progress as SyncProgress)
     } catch {
       // 网络抖动或瞬时 404：不中断轮询，下一轮重试
     }
   }, 2000)
 }
 
-onBeforeUnmount(stopPoll)
+/**
+ * 订阅某 collection 的同步进度（v0.53）：SSE 推送为主，2s 轮询兜底。
+ * SSE 正常时事件即到（gotEvent=true）→ 定时器不接管；SSE 不可用（如旧服务
+ * 未含 /api/events、代理不支持流式）时 4s 后轮询接管，保持 v0.51 行为。
+ */
+function startWatch(id: string) {
+  stopWatch()
+  watchedId = id
+  let gotEvent = false
+  sseUnsub = subscribeEvents(['sync.progress'], (ev) => {
+    if (ev.type !== 'sync.progress' || ev.collection_id !== id || watchedId !== id) return
+    gotEvent = true
+    stopPoll() // SSE 正常工作，轮询兜底退出
+    void handleProgress(id, ev as unknown as SyncProgress)
+  })
+  window.setTimeout(() => {
+    if (watchedId === id && !gotEvent) startPoll(id)
+  }, 4000)
+}
+
+onBeforeUnmount(stopWatch)
 
 // ---------- 详情正文渲染（v0.52） ----------
 // note.md 图片为本地化相对路径 raw/img-*，SPA 下浏览器按当前路由解析必然 404——
@@ -358,8 +392,8 @@ async function syncNow() {
   error.value = ''
   try {
     await api.post(`/api/collections/${current.value}/sync`)
-    // v0.51：轮询实时进度，完成后自动刷新目录树（不再立即 select 拿旧树）
-    startPoll(current.value)
+    // v0.53：SSE 订阅实时进度（轮询兜底），完成后自动刷新目录树
+    startWatch(current.value)
     await loadCollections()
   } catch (e) {
     syncing.value = false

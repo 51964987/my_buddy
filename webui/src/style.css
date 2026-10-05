@@ -331,6 +331,17 @@ table.list tr:hover td {
   background: #fafbfc;
 }
 
+/* 审核台卡片分组头行（v0.54）：类型徽标 + 来源条目数 */
+table.list tr.group-row td {
+  background: #f8fafc;
+  border-top: 2px solid var(--line);
+  font-size: 13px;
+  padding-top: 10px;
+}
+table.list tr.group-row .badge {
+  margin-left: 8px;
+}
+
 /* ---------- 下拉浮层（v0.28 文档树导出，行为见 PopoverMenu.vue） ---------- */
 /* 根作定位上下文：触发器收缩到内容宽，浮层绝对定位在其下方 */
 .popover-menu {

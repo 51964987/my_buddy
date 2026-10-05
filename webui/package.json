@@ -12,6 +12,7 @@
     "@types/dompurify": "^3.0.5",
     "docx": "^9.8.1",
     "dompurify": "^3.4.16",
+    "echarts": "^6.1.0",
     "fflate": "^0.8.3",
     "marked": "^18.0.14",
     "vue": "^3.5.13",
