@@ -408,9 +408,10 @@ def test_entity_name_sanity_rejects_template_parroting(cfg, guard):
         {
             "entities": [
                 {"name": "产品名", "type": "产品", "aliases": []},  # 模板占位词
-                {"name": "概念", "type": "概念", "aliases": []},  # 与实体类型同名
-                {"name": "云", "type": "概念", "aliases": []},  # 单字（长度不足 2）
+                {"name": "技术", "type": "技术", "aliases": []},  # 与实体类型同名
+                {"name": "云", "type": "技术", "aliases": []},  # 单字（长度不足 2）
                 {"name": "ByteHouse", "type": "产品", "aliases": ["产品名，可省略", "BH"]},  # 正常实体
+                {"name": "缺损", "type": "概念", "aliases": []},  # 类型越界（v0.58 默认白名单已移除「概念」）→ 丢弃
             ],
             "relations": [],
         },
@@ -421,8 +422,9 @@ def test_entity_name_sanity_rejects_template_parroting(cfg, guard):
     result = enricher.enrich_entry(rel)
 
     assert not (guard.kb_root / "wiki" / f"{entity_card_id('产品名')}.md").exists()
-    assert not (guard.kb_root / "wiki" / f"{entity_card_id('概念')}.md").exists()
+    assert not (guard.kb_root / "wiki" / f"{entity_card_id('技术')}.md").exists()
     assert not (guard.kb_root / "wiki" / f"{entity_card_id('云')}.md").exists()
+    assert not (guard.kb_root / "wiki" / f"{entity_card_id('缺损')}.md").exists()
     fm = _fm(guard.kb_root / "wiki" / f"{entity_card_id('ByteHouse')}.md")
     assert fm["aliases"] == ["BH"]  # 含模板词的别名被过滤，真实别名保留
     assert result["entities_discarded"] == 3
@@ -435,7 +437,7 @@ def test_entity_merge_idempotent(cfg, guard):
 
     reply = json.dumps(
         {
-            "entities": [{"name": "共享实体", "type": "概念", "aliases": ["别名一"]}],
+            "entities": [{"name": "共享实体", "type": "技术", "aliases": ["别名一"]}],
             "relations": [{"source": "共享实体", "type": "相关", "target": "共享实体"}],
         },
         ensure_ascii=False,
@@ -450,7 +452,7 @@ def test_entity_merge_idempotent(cfg, guard):
     # 第二个条目给出不同别名与同一条关系 → 合并而非重复
     reply2 = json.dumps(
         {
-            "entities": [{"name": "共享实体", "type": "概念", "aliases": ["别名二", "别名一"]}],
+            "entities": [{"name": "共享实体", "type": "技术", "aliases": ["别名二", "别名一"]}],
             "relations": [{"source": "共享实体", "type": "相关", "target": "共享实体"}],
         },
         ensure_ascii=False,
