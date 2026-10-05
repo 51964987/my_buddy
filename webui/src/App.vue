@@ -14,6 +14,7 @@ const navs = [
   { name: 'search', title: '检索', icon: 'search' },
   { name: 'timeline', title: '时间流', icon: 'clock' },
   { name: 'docs', title: '文档树', icon: 'folder' },
+  { name: 'graph', title: '图谱', icon: 'graph' },
   { name: 'curation', title: '审核台', icon: 'shield' },
   { name: 'settings', title: '参数设置', icon: 'gear' },
 ]
@@ -89,6 +90,10 @@ const pageTitle = computed(() => (route.meta.title as string) ?? '')
         </template>
         <template v-else-if="n.icon === 'folder'">
           <path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+        </template>
+        <template v-else-if="n.icon === 'graph'">
+          <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="12" cy="18" r="2.5" />
+          <line x1="8" y1="7.5" x2="11" y2="15.8" /><line x1="16" y1="7.5" x2="13" y2="15.8" /><line x1="8.5" y1="6" x2="15.5" y2="6" />
         </template>
         <template v-else-if="n.icon === 'shield'">
           <path d="M12 3l8 3v6c0 4.5-3.2 7.8-8 9-4.8-1.2-8-4.5-8-9V6z" />

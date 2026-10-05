@@ -377,6 +377,21 @@ def create_app(cfg: Config | None = None, orchestrator: Orchestrator | None = No
         """显式恢复自动整理（清零熔断运行态，§5.1 v0.29）——唯一恢复路径。"""
         return {"breaker": orch.breaker_reset()}
 
+    @app.get("/api/graph", dependencies=[Depends(auth)])
+    def graph():
+        """知识图谱浏览（§5.1 ④ v0.57）：promoted 实体节点 + 关系边（kg_edges 派生缓存）。
+
+        经 index 懒同步保证边表与语料同源；索引库异常 503 + 重建入口（对齐检索口径）。
+        """
+        try:
+            indexer.ensure_fresh()
+            return indexer.graph()
+        except sqlite3.Error as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"index unavailable: {exc}; try POST /api/index/rebuild",
+            )
+
     @app.get("/api/search", dependencies=[Depends(auth)])
     def search(q: str, limit: int = 20, mode: str = "fulltext"):
         # P4 实施口径：查询时懒同步（TTL 限频），检索结果始终对齐当前库文件；

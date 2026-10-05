@@ -62,6 +62,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
     date UNINDEXED, tags UNINDEXED, status UNINDEXED
 );
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+-- 知识图谱边表（§5.1 ③ v0.57）：关系事实源在实体卡 frontmatter relations（铁律 1），
+-- 此处是懒同步时全量派生的可重建缓存；仅 promoted 实体卡入表
+CREATE TABLE IF NOT EXISTS kg_edges(
+    src TEXT NOT NULL, dst TEXT NOT NULL, type TEXT NOT NULL,
+    PRIMARY KEY(src, dst, type)
+);
 """
 
 
@@ -304,6 +310,8 @@ class Indexer:
                 self._insert_doc(conn, rel, stat, doc)
                 summary["updated" if old else "added"] += 1
             summary["total"] = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+            # 知识图谱边表随懒同步派生（§5.1 ③ v0.57）：在 diff 同一事务内，保留已删除卡的边不残留
+            self._derive_kg_edges(conn)
             conn.commit()  # 增量 diff 事务提交（closing 只关连接不提交，勿依赖隐式提交）
         self._last_sync = time.monotonic()
         self._sync_vectors(corpus)
@@ -321,6 +329,7 @@ class Indexer:
             except OSError:
                 continue
             self._insert_doc(conn, rel, stat, doc)
+        self._derive_kg_edges(conn)
         conn.commit()
         self._last_sync = time.monotonic()
         return {"rebuilt": True, "reason": reason, "added": len(corpus), "total": len(corpus)}
@@ -343,6 +352,77 @@ class Indexer:
             conn.commit()
         self._sync_vectors(corpus)
         return result
+
+    # ---------- 知识图谱（§5.1 ③④ v0.57：kg_edges 派生 + 图谱数据） ----------
+
+    def _promoted_entity_cards(self) -> list[dict]:
+        """扫 wiki/ 取 promoted 实体卡 frontmatter（请求时读盘，卡量级小可接受）。"""
+        out = []
+        wiki = self.guard.kb_root / "wiki"
+        if not wiki.is_dir():
+            return out
+        for card in sorted(wiki.rglob("*.md")):
+            try:
+                fm, _ = split_note(card.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if str(fm.get("type") or "") != "entity" or fm.get("status") != "promoted":
+                continue  # 仅 promoted 进图谱（draft 不入图，对齐纪律 1）
+            if fm.get("id"):
+                out.append(fm)
+        return out
+
+    def _derive_kg_edges(self, conn: sqlite3.Connection) -> int:
+        """派生 kg_edges（§5.1 ③ v0.57）：事实源 = 实体卡 frontmatter relations。
+
+        target 卡不存在或非 promoted → 丢弃该边；全量重建式派生（DELETE 后
+        INSERT，禁 INSERT OR REPLACE 的 FTS5 教训在此不适用，但全量重建同样
+        杜绝已删除卡的旧边残留）。
+        """
+        cards = self._promoted_entity_cards()
+        promoted = {str(fm["id"]) for fm in cards}
+        conn.execute("DELETE FROM kg_edges")
+        edges = 0
+        for fm in cards:
+            src = str(fm["id"])
+            for r in fm.get("relations") or []:
+                if not isinstance(r, dict):
+                    continue
+                tgt = str(r.get("target") or "").strip()
+                rtype = str(r.get("type") or "").strip()
+                if not tgt or not rtype or tgt not in promoted:
+                    continue
+                conn.execute(
+                    "INSERT OR IGNORE INTO kg_edges(src, dst, type) VALUES(?, ?, ?)",
+                    (src, tgt, rtype),
+                )
+                edges += 1
+        return edges
+
+    def graph(self) -> dict:
+        """图谱浏览数据（§5.1 ④ v0.57）：节点 = promoted 实体卡（含孤立节点），边 = kg_edges。
+
+        调用方须先 ensure_fresh 保证边表与语料同源；节点带 sources 数供前端展示溯源性。
+        """
+        nodes = []
+        promoted: set[str] = set()
+        for fm in self._promoted_entity_cards():
+            cid = str(fm["id"])
+            promoted.add(cid)
+            nodes.append(
+                {
+                    "id": cid,
+                    "name": str(fm.get("name") or cid),
+                    "entity_type": str(fm.get("entity_type") or ""),
+                    "sources": len(fm.get("sources") or []),
+                }
+            )
+        with closing(self._connect()) as conn:
+            rows = conn.execute("SELECT src, dst, type FROM kg_edges").fetchall()
+        edges = [
+            {"source": s, "target": d, "type": t} for s, d, t in rows if s in promoted and d in promoted
+        ]
+        return {"nodes": nodes, "edges": edges, "total_nodes": len(nodes), "total_edges": len(edges)}
 
     # ---------- 向量增强（§5.1 v0.17 实施口径） ----------
 

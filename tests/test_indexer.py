@@ -34,6 +34,93 @@ def make_wiki_card(guard, rel: str, *, card_id: str, title: str, body: str):
     guard.write_text("enrich", rel, text)
 
 
+def make_entity_card(guard, name: str, *, status: str = "promoted", relations=None):
+    """按 enrich 产物形态写实体卡（§4.5 v0.40），返回卡 id。"""
+    from kbserver.enrich import entity_card_id
+
+    cid = entity_card_id(name)
+    fm = {
+        "id": cid,
+        "type": "entity",
+        "ai_generated": True,
+        "status": status,
+        "name": name,
+        "aliases": [],
+        "entity_type": "技术",
+        "relations": relations or [],
+        "sources": ["seed1"],
+        "created_at": "2026-10-05T10:00:00+08:00",
+        "model": "fake-model",
+    }
+    guard.write_text(
+        "enrich",
+        f"wiki/{cid}.md",
+        "---\n" + yaml.safe_dump(fm, allow_unicode=True, sort_keys=False) + "---\n\n" + f"# {name}\n",
+    )
+    return cid
+
+
+def test_kg_edges_derivation_and_graph(cfg, guard):
+    """kg_edges 派生（§5.1 ③ v0.57）：仅 promoted 入图；孤儿边/ draft 端点边丢弃。"""
+    from kbserver.enrich import entity_card_id
+
+    a = make_entity_card(guard, "Alpha", status="promoted")
+    b = make_entity_card(guard, "Beta", status="promoted")
+    make_entity_card(
+        guard,
+        "Gamma",
+        status="draft",  # draft：不入图（节点与边端点均排除）
+        relations=[{"type": "相关", "target": a, "name": "Alpha"}],
+    )
+    make_entity_card(
+        guard,
+        "Delta",
+        status="promoted",
+        relations=[
+            {"type": "依赖", "target": b, "name": "Beta"},  # 合法边
+            {"type": "相关", "target": "w-notexist123", "name": "幽灵"},  # target 不存在 → 丢弃
+            {"type": "相关", "target": entity_card_id("Gamma"), "name": "Gamma"},  # target 非 promoted → 丢弃
+        ],
+    )
+    make_entity_card(guard, "Echo", status="promoted")  # 孤立节点：无边但入节点表
+
+    idx = Indexer(cfg, guard)
+    idx.sync()
+    g = idx.graph()
+
+    names = {n["name"] for n in g["nodes"]}
+    assert names == {"Alpha", "Beta", "Delta", "Echo"}  # Gamma draft 不入节点
+    assert all(n["entity_type"] == "技术" and n["sources"] == 1 for n in g["nodes"])
+    edge_pairs = [(e["source"], e["target"], e["type"]) for e in g["edges"]]
+    assert edge_pairs == [(entity_card_id("Delta"), b, "依赖")]  # 仅 Delta→Beta 存活（合法边建在 Delta 上）
+    assert g["total_nodes"] == 4 and g["total_edges"] == 1
+
+
+def test_kg_edges_rebuild_no_stale_rows(cfg, guard):
+    """重跑幂等且无残留：删除卡的旧边在下次派生后消失（全量重建式派生）。"""
+    from kbserver.enrich import entity_card_id
+
+    a = make_entity_card(guard, "Alpha", status="promoted")
+    b = make_entity_card(guard, "Beta", status="promoted")
+    make_entity_card(
+        guard, "Delta", status="promoted", relations=[{"type": "依赖", "target": b, "name": "Beta"}]
+    )
+    idx = Indexer(cfg, guard)
+    idx.sync()
+    assert len(idx.graph()["edges"]) == 1
+
+    # Alpha 被人工删除（curation 守卫通道单文件删除）→ 节点消失；Delta→Beta 边仍在
+    import os
+
+    os.remove(guard.kb_root / "wiki" / f"{a}.md")
+    idx.sync()
+    g = idx.graph()
+    assert {n["name"] for n in g["nodes"]} == {"Beta", "Delta"}
+    assert [(e["source"], e["target"], e["type"]) for e in g["edges"]] == [
+        (entity_card_id("Delta"), b, "依赖")
+    ]
+
+
 def touch(path):
     """mtime 粒度依赖文件系统（Windows 约 100ns~15ms），写后强制推进 mtime。"""
     st = path.stat()

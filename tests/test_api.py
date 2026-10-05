@@ -67,6 +67,23 @@ def test_wiki_list_type_filter_and_batch_api(cfg, guard):
         assert client.get("/api/wiki/w-a1").json()["status"] == "promoted"
 
 
+def test_graph_api(cfg, guard):
+    """GET /api/graph（v0.57）：懒同步后返回 promoted 节点与派生边。"""
+    from .test_indexer import make_entity_card
+
+    make_entity_card(guard, "Alpha", status="promoted")
+    b = make_entity_card(guard, "Beta", status="promoted")
+    make_entity_card(
+        guard, "Delta", status="promoted", relations=[{"type": "依赖", "target": b, "name": "Beta"}]
+    )
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        g = client.get("/api/graph").json()
+        assert g["total_nodes"] == 3 and g["total_edges"] == 1
+        assert {n["name"] for n in g["nodes"]} == {"Alpha", "Beta", "Delta"}
+        assert g["edges"][0]["type"] == "依赖"
+
+
 def test_capture_and_status_api(cfg, guard):
     cfg.data["pipeline"]["worker_enabled"] = False
     app = create_app(cfg)
