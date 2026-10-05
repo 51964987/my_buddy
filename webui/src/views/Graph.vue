@@ -4,7 +4,7 @@
  * 数据复用 /api/graph（kg_edges 派生缓存）；draft 不入图——图谱只呈现人工确认过的知识。
  * 渲染经 kg-graph.ts（echarts Graph，动态 import 独立分包）；节点点击展示实体详情。
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../api'
 
 interface GraphNode {
@@ -55,6 +55,10 @@ onMounted(async () => {
     edges.value = data.edges
     totalNodes.value = data.total_nodes
     totalEdges.value = data.total_edges
+    loading.value = false
+    // 容器 div 在 v-else 分支内（须 loading=false 才渲染）：先置 loading 再 nextTick 等渲染完成，
+    // 否则 container.value 为 undefined，图表初始化被跳过（实测空 canvas、只见计数）
+    await nextTick()
     if (container.value && data.nodes.length) {
       const mod = await import('../kg-graph')
       handle = mod.createGraph(container.value, data.nodes, data.edges, selectNode)
@@ -62,7 +66,6 @@ onMounted(async () => {
     error.value = ''
   } catch (e) {
     error.value = String(e instanceof Error ? e.message : e)
-  } finally {
     loading.value = false
   }
 })
