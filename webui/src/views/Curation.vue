@@ -68,6 +68,16 @@ function toggleGroupOpen(key: string) {
   openedGroup.value = openedGroup.value === key ? '' : key
 }
 
+/** 明细构成标签按组内实际类型动态生成（如「实体卡 9 张」/「实体卡 8 张 + 概念卡 1 张」）——概念卡仅在总览聚合后产出，文案不预设类型全集 */
+function relatedLabel(g: EntryGroup): string {
+  const counts = new Map<string, number>()
+  for (const c of g.related) {
+    const t = TYPE_LABELS[c.type] ?? c.type
+    counts.set(t, (counts.get(t) ?? 0) + 1)
+  }
+  return [...counts.entries()].map(([t, n]) => `${t} ${n} 张`).join(' + ')
+}
+
 /** 表格扁平行模型：组主行（摘要卡）/ 明细开关行 / 明细行（实体卡），单一 v-for 渲染保证详情行紧跟其卡行 */
 type Row =
   | { kind: 'card'; card: WikiCard; group: EntryGroup; role: 'summary' | 'related' }
@@ -345,7 +355,7 @@ onMounted(load)
               <td colspan="5">
                 <button class="link-toggle" style="background: none; border: none; cursor: pointer; color: var(--accent, #2563eb); padding: 0" @click="toggleGroupOpen(row.group.key)">
                   {{ openedGroup === row.group.key ? '▾' : '▸' }}
-                  实体/概念卡 {{ row.group.related.length }} 张（{{ draftRelated(row.group) }} 张待审）
+                  {{ relatedLabel(row.group) }}（{{ draftRelated(row.group) }} 张待审）
                 </button>
               </td>
             </tr>
