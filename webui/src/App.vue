@@ -9,13 +9,16 @@ const collapsed = ref(localStorage.getItem('kb_sidebar_collapsed') === '1')
 const curationTodo = ref(0) // 审核台待办：待审单元数（draft 摘要卡，1 条目 1 单元；v0.55 口径）
 const route = useRoute()
 
+// 导航按管道依赖序（v0.59，§11.8）：总览（管道地图）→ 文档树（内容入口）
+// → 审核台（AI 产出把关）→ 图谱（结构化知识）→ 检索/时间流（消费）→ 设置殿后；
+// 页面之内仍维持 attention-first（v0.47：异常置顶、高频近手），两层口径互不冲突
 const navs = [
   { name: 'overview', title: '总览', icon: 'grid' },
+  { name: 'docs', title: '文档树', icon: 'folder' },
+  { name: 'curation', title: '审核台', icon: 'shield' },
+  { name: 'graph', title: '图谱', icon: 'graph' },
   { name: 'search', title: '检索', icon: 'search' },
   { name: 'timeline', title: '时间流', icon: 'clock' },
-  { name: 'docs', title: '文档树', icon: 'folder' },
-  { name: 'graph', title: '图谱', icon: 'graph' },
-  { name: 'curation', title: '审核台', icon: 'shield' },
   { name: 'settings', title: '参数设置', icon: 'gear' },
 ]
 
