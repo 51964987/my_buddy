@@ -4,7 +4,7 @@
 
 ## 必读顺序
 
-1. 项目规则：`.codebuddy/rules/*/RULE.mdc`（核心铁律、技术栈、工作流为 always-apply；设计与 UI 规则按需加载）
+1. 项目规则：`.codebuddy/rules/*/RULE.mdc`（核心铁律、技术栈、工作流为 always-apply；设计索引、UI 约束、平台/索引专项为按需加载）
 2. 设计唯一事实源：`docs/方案文档.md`（章节索引见 `.codebuddy/rules/03-design-reference/RULE.mdc`）
 
 ## 一分钟守则

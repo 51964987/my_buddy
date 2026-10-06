@@ -2,7 +2,7 @@
 description: 技术栈选型与禁用清单（Python/FastAPI/SQLite），写代码前必读
 alwaysApply: true
 enabled: true
-updatedAt: 2026-10-02T02:00:00.000Z
+updatedAt: 2026-10-06T00:00:00.000Z
 ---
 
 # 技术栈约定
@@ -21,11 +21,9 @@ updatedAt: 2026-10-02T02:00:00.000Z
 - 消息队列（inbox 目录即队列）、Elasticsearch/Milvus/Qdrant 等独立索引服务（FTS5 + sqlite-vec 起步）、ORM 框架（schema 即文件系统 + 轻量 SQL）。
 - 任何把数据写死到单一厂商 SDK 的调用方式（换模型后端必须只改配置）。
 
-## 平台约束
+## 平台约束（核心）
 
 - 目标运行环境 Windows：路径字面量一律 ASCII；注意 MAX_PATH（D 类章节路径落盘前清洗，见方案文档 5.3 第 6 条）。
-- FTS5 中文检索：jieba 搜索引擎模式预分词后入索引列（空格分隔，unicode61 按 token 切分），索引与查询共用同一 segment 实现；依据方案文档 §9 决策 5（v0.15 定稿）与 §5.1 index 实施口径。
-- FTS5 虚拟表禁止 `INSERT OR REPLACE`（实测内容表残留旧文本、新词不进倒排索引）；更新文档必须显式 `DELETE` 后 `INSERT`。
-- **第三方依赖必须登记进启动自检**（`kbserver/deps.py`，服务 lifespan 执行，v0.36）：延迟导入（jieba/sqlite-vec/playwright）缺装不会在启动时暴露，只在用户点该路径时变成无信息 500。新增任何延迟导入或新增第三方依赖，必须同步登记——必需依赖缺失则拒绝启动，可选依赖缺失仅告警并由功能侧走 409/带安装提示的错误口径；探测用 `importlib.util.find_spec`，不在启动时真导入。装依赖必须用**启动服务的那个解释器**（`Get-CimInstance Win32_Process` 查 `ExecutablePath`，PATH 上的 `python` 未必是它）。
-- **可选依赖的缺失不得裸穿成 500**：函数内 `import X` 前先经统一入口（如 `indexer.load_vec_module()`）取模块，取不到即转该功能既有的错误口径（`SemanticSearchError` → 409 / `vector_state=error`）。捕获 SQLite 异常一律用 `sqlite3.Error` 全族，禁止只捕 `OperationalError`（漏父类 `DatabaseError`，库损坏即穿透成无信息 500）。
-- PowerShell 脚本（`.ps1`/`.psm1`/`.psd1`）一律保存为 **UTF-8 with BOM**：Windows PowerShell 5.1 对无 BOM 脚本按 ANSI（GBK）解析，中文输出乱码、字面量失真；由 `.editorconfig` 机械保证，编辑或新建脚本时不得改回无 BOM。
+- FTS5 中文检索须 jieba 预分词入索引列，索引与查询共用同一 segment（详见方案文档 §5.1 与 §9 决策 5）。
+
+> FTS5 虚拟表写操作、SQLite 异常捕获、第三方依赖自检、PowerShell 脚本编码等专项细节见 `.codebuddy/rules/05-platform-details/RULE.mdc`（按需加载）。

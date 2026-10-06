@@ -2,7 +2,7 @@
 description: 个人知识沉淀系统（kb buddy）的核心铁律与数据纪律，任何代码/文档修改前必读
 alwaysApply: true
 enabled: true
-updatedAt: 2026-10-03T00:00:00.000Z
+updatedAt: 2026-10-06T00:00:00.000Z
 ---
 
 # 核心铁律与数据纪律
@@ -17,21 +17,19 @@ updatedAt: 2026-10-03T00:00:00.000Z
 
 ## 写边界（所有写盘必须经写边界守卫）
 
-- normalize 只写 `sources/`、`collections/`；enrich 只写 `wiki/` + 源条目 frontmatter 的 `ai.*`、`tags` 两个字段；sync 只写本 `collections/<id>/`；index 只写 `index.db`。
-- 禁止任何模块绕过守卫直接写文件（人工编辑 `kb/` 是系统外例外，代码中不得依赖该通道）。
-- 所有状态类 JSON（`collection.json`/`toc.json`/`capture.json`）与配置写盘一律原子写（tmp + rename）。
-- **守卫区域白名单按操作分域（2026-10-03 沉淀，v0.34）**：普通写（新建/覆盖、字段级补丁、`meta.json`）与破坏性写（物理删除、整树移动）用两张区域表，`collections/` 只在普通写表内（源站镜像可写不可删）。新增 stage 或新增数据区时，**必须核对该 stage 的合法目标集**（哪些区的 `note.md` 会进扫描/试跑/流水），两表都要过一遍——只放行一半的典型症状是该区的操作 500（v0.16 引入 D 类页时漏了 enrich/curation）。
-- **失败态落盘失败不得冒泡成 500（铁律 3 底线）**：记录失败本身（写 `meta.json` 流水 / 补丁 `status: error`）若写盘失败，须记服务端日志并按终态 `error` 返回，禁止让异常穿透成 HTTP 500——那会同时吞掉 `error_stage`/`error_message` 与可观测性。批量执行须逐条收口，单条异常不打断整批（串行与并发路径同口径）。
+- 分区职责：normalize 只写 `sources/`、`collections/`；enrich 只写 `wiki/` + 源条目 frontmatter 的 `ai.*`、`tags`；sync 只写本 `collections/<id>/`；index 只写 `index.db`。禁止任何模块绕过守卫直接写文件。
+- 状态类 JSON（`collection.json`/`toc.json`/`capture.json`）与配置写盘一律原子写（tmp + rename）。
+- 守卫区域白名单按操作分域：普通写（新建/覆盖、字段级补丁、`meta.json`）与破坏性写（物理删除、整树移动）用两张区域表，`collections/` 只在普通写表内（源站镜像可写不可删）。新增 stage 或数据区时，两表都要核对其合法目标集（典型症状：只放行一半 → 该区操作 500）。
+- 失败态落盘失败不得冒泡成 500：记录失败本身（写 `meta.json` 流水 / 补丁 `status: error`）若写盘失败，须记服务端日志并按终态 `error` 返回。批量执行须逐条收口，单条异常不打断整批。
 
 ## 内容纪律
 
-- `wiki/` 卡片必须带 `ai_generated: true` 且初始 `status: draft`；代码中禁止出现自动晋升（draft→promoted）逻辑，晋升只能人工触发。
+- `wiki/` 卡片必须带 `ai_generated: true` 且初始 `status: draft`；代码中禁止自动晋升（draft→promoted），晋升只能人工触发。
 - `meta.json` 与 frontmatter 职责交集为空：`content_hash`/`original_url`/`error_*`/raw 清单只进 meta.json；`tags`/`ai.*` 只进 frontmatter。禁止双写同一字段。
 
-## 自动化纪律（2026-10-03 沉淀，v0.29 触发门控）
+## 自动化纪律
 
-1. **自动化默认手动**：任何后台批处理/自动整理能力必须把「允许执行」与「谁来触发」拆成两件事——总闸（允许）与触发模式（manual/auto）分离，**触发模式默认 `manual`**。"开了总闸就自动全量跑"是设计缺陷，不是实现疏忽。
-2. **放量前必须可试跑**：自动档之外必须提供零副作用的试跑路径（不落盘、不计重试、不写流水），且试跑与真实执行共用同一 prompt/解析代码，保证"预览即所得"。
-3. **自动化失败要熔断**：auto 模式下整轮无成功须累计并自动暂停（阈值可配），运行态经配置中心原子写；**恢复只经显式人工动作**，程序不得自行判断"是否已修好"。手动路径不受自动化门控与熔断影响。
-4. **失败口径含 retry**：熔断/健康度判定中的"失败"必须把未超重试上限的 `retry` 计入（只数终态 `error` 会漏判"整轮全失败"——模型不可达时 outcome 正是 `retry`）。
-
+1. 自动化默认手动：后台批处理须把「允许执行」（总闸）与「谁来触发」（manual/auto）拆开，触发模式默认 `manual`。
+2. 放量前必须可试跑：提供零副作用试跑路径（不落盘、不计重试、不写流水），且与真实执行共用同一 prompt/解析代码。
+3. 自动化失败要熔断：auto 模式整轮无成功须累计并自动暂停（阈值可配），运行态经配置中心原子写；恢复只经显式人工动作。
+4. 失败口径含 retry：熔断/健康度判定必须把未超重试上限的 `retry` 计入（只数终态 `error` 会漏判"整轮全失败"）。

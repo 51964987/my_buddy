@@ -1,0 +1,25 @@
+---
+description: 写 FTS5 全文索引/SQLite/依赖自检/PowerShell 脚本/Windows 路径时的专项约束（改 indexer/deps/脚本时加载）
+alwaysApply: false
+enabled: true
+updatedAt: 2026-10-06T00:00:00.000Z
+---
+
+# 平台与索引专项约束
+
+## FTS5 / SQLite
+
+- FTS5 虚拟表禁止 `INSERT OR REPLACE`（内容表残留旧文本、新词不进倒排索引）；更新文档必须显式 `DELETE` 后 `INSERT`。
+- 捕获 SQLite 异常一律用 `sqlite3.Error` 全族，禁止只捕 `OperationalError`（漏父类 `DatabaseError`，库损坏即穿透成无信息 500）。
+- 增量写路径用 `closing()` 时必须显式 `conn.commit()`，否则连接关闭即回滚。
+- FTS5 snippet() 对 UNINDEXED 列定位不到命中点，摘要用手动窗口实现。
+
+## 第三方依赖自检
+
+- 延迟导入（jieba/sqlite-vec/playwright）缺装不在启动时暴露，须登记进 `kbserver/deps.py` 启动自检：必需缺失拒绝启动，可选缺失仅告警并由功能侧走 409/带安装提示的错误口径。探测用 `importlib.util.find_spec`，不在启动时真导入。
+- 可选依赖缺失不得裸穿成 500：经统一入口（如 `indexer.load_vec_module()`）取模块，取不到即转该功能既有错误口径（`SemanticSearchError` → 409 / `vector_state=error`）。
+- 装依赖必须用启动服务的那个解释器（`Get-CimInstance Win32_Process` 查 `ExecutablePath`，PATH 上的 `python` 未必是它）。
+
+## PowerShell 脚本
+
+- `.ps1`/`.psm1`/`.psd1` 一律保存为 **UTF-8 with BOM**（Windows PowerShell 5.1 对无 BOM 脚本按 ANSI/GBK 解析，中文乱码）；由 `.editorconfig` 机械保证，编辑或新建脚本不得改回无 BOM。
