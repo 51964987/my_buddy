@@ -445,6 +445,29 @@ table.list td.cell-main {
   padding: 4px 12px;
 }
 
+/* 分页条（v0.60，业界分页器口径：AntD/Element/GitHub——区间提示 + 每页条数 + 页码省略） */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.pager button {
+  padding: 3px 10px;
+}
+
+.pager button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  cursor: default;
+}
+
+.pager select {
+  padding: 2px 6px;
+}
+
 /* 宽表横向滚动兜底：容器内滚，不撑破面板（参考 GitHub 设置页宽表做法） */
 .table-scroll {
   overflow-x: auto;
@@ -875,4 +898,23 @@ details[open] > summary.tree-dir::after {
 .tree-page-active {
   font-weight: 600;
   color: #2563eb;
+}
+
+/* 图谱三视图切换（v0.68）：实体图 / 概念图 / 双层混合 */
+.graph-kinds {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.graph-kinds button {
+  padding: 3px 12px;
+  font-size: 12px;
+}
+
+.graph-kinds button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  cursor: default;
 }

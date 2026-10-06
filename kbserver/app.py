@@ -11,6 +11,8 @@ import asyncio
 import json
 import re
 import sqlite3
+import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,7 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import __version__
+from . import ask as askmod
 from . import curation
 from . import events
 from . import exporter
@@ -33,7 +36,8 @@ from .deps import check_dependencies
 from .enrich import EnrichError, EntryNotFound, EntryStateError
 from .frontmatter import split_note
 from .guard import Guard, WriteBoundaryError
-from .indexer import Indexer, SemanticSearchError
+from .indexer import GRAPH_KINDS, Indexer, SemanticSearchError
+from .llm import LLMError
 from .maintenance import reset_regions
 from .orchestrator import Orchestrator
 from .platforms import platform_options, source_type_options
@@ -85,6 +89,11 @@ class CollectionPatchRequest(BaseModel):
     # v0.50 集合元数据更新：name/entry_url 至少一项（§6）
     name: str | None = None
     entry_url: str | None = None
+
+
+class AskRequest(BaseModel):
+    # v0.61 问答：单轮只读消费（不做多轮，§5.1 ask 口径"不做"清单）
+    q: str
 
 
 def create_app(cfg: Config | None = None, orchestrator: Orchestrator | None = None) -> FastAPI:
@@ -378,14 +387,18 @@ def create_app(cfg: Config | None = None, orchestrator: Orchestrator | None = No
         return {"breaker": orch.breaker_reset()}
 
     @app.get("/api/graph", dependencies=[Depends(auth)])
-    def graph():
-        """知识图谱浏览（§5.1 ④ v0.57）：promoted 实体节点 + 关系边（kg_edges 派生缓存）。
+    def graph(kind: str = "entity"):
+        """知识图谱浏览（§5.1 ④ v0.68 三视图）：`?kind=entity|concept|mixed`。
 
-        经 index 懒同步保证边表与语料同源；索引库异常 503 + 重建入口（对齐检索口径）。
+        entity 实体图（默认，兼容既有消费方）/ concept 概念图（概念—实体共现边）/
+        mixed 双层混合（共现 + 实体 relations）；非法 kind → 400。经 index 懒同步
+        保证关系边表与语料同源；索引库异常 503 + 重建入口（对齐检索口径）。
         """
+        if kind not in GRAPH_KINDS:
+            raise HTTPException(status_code=400, detail=f"unknown graph kind: {kind}")
         try:
             indexer.ensure_fresh()
-            return indexer.graph()
+            return indexer.graph(kind)
         except sqlite3.Error as exc:
             raise HTTPException(
                 status_code=503,
@@ -409,6 +422,76 @@ def create_app(cfg: Config | None = None, orchestrator: Orchestrator | None = No
                 status_code=503,
                 detail=f"index unavailable: {type(exc).__name__}: {exc}; rebuild via POST /api/index/rebuild",
             )
+
+    @app.post("/api/ask", dependencies=[Depends(auth)])
+    async def ask(req: AskRequest):
+        """问答（§5.1 ask 实施口径 v0.61）：SSE 流式只读端点。
+
+        事件帧：ask.meta（检索模式/引用/实体，先于生成到达）→ ask.delta（token 增量）
+        → ask.done（耗时/模型）/ ask.error（错误终帧）。生成是同步 httpx 流，
+        经工作线程 + asyncio.Queue 桥接进 SSE（不阻塞事件循环）；错误收口为
+        ask.error 终帧而非裸 500（LLM 失败语义对齐 enrich 502 口径）。
+        """
+        if not orch.ai_enabled():
+            raise HTTPException(status_code=409, detail="AI is disabled in config (ai.enabled)")
+        try:
+            plan = askmod.plan_ask(indexer, req.q)
+        except askmod.AskError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except sqlite3.Error as exc:
+            # 索引库异常：503 + 重建入口（对齐 /api/search 口径）
+            raise HTTPException(
+                status_code=503,
+                detail=f"index unavailable: {type(exc).__name__}: {exc}; rebuild via POST /api/index/rebuild",
+            )
+        try:
+            model, stream = askmod.ask_stream(cfg.data.get("ai", {}), askmod.build_messages(plan))
+        except LLMError as exc:
+            # 任务未配置/模型不可达：上游失败语义，不泄露凭据（消息已由 llm 层掩码）
+            raise HTTPException(status_code=502, detail=str(exc))
+
+        loop = asyncio.get_running_loop()
+        started = time.monotonic()
+
+        def sse(event: str, data: dict) -> str:
+            return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        async def gen():
+            yield sse("ask.meta", {
+                "retrieval": plan["retrieval"],
+                "refs": askmod.build_refs(plan),
+                "entities": plan["entities"],
+            })
+            q: asyncio.Queue = asyncio.Queue()
+
+            def worker():
+                # 同步生成器在工作线程消费，经 call_soon_threadsafe 投回事件循环
+                try:
+                    for delta in stream:
+                        loop.call_soon_threadsafe(q.put_nowait, ("delta", delta))
+                except LLMError as exc:
+                    loop.call_soon_threadsafe(q.put_nowait, ("error", str(exc)))
+                except Exception as exc:  # 兜底：任何异常都须有错误终帧，不得静默断流
+                    loop.call_soon_threadsafe(q.put_nowait, ("error", f"{type(exc).__name__}: {exc}"))
+                finally:
+                    loop.call_soon_threadsafe(q.put_nowait, ("_end", None))
+
+            threading.Thread(target=worker, daemon=True).start()
+            failed = False
+            while True:
+                kind, data = await q.get()
+                if kind == "_end":
+                    break
+                if kind == "error":
+                    # 错误终帧后不再发 done（错误与完成互斥，前端以终帧判定收尾）
+                    failed = True
+                    yield sse("ask.error", {"error": data})
+                    break
+                yield sse("ask.delta", {"delta": data})
+            if not failed:
+                yield sse("ask.done", {"model": model, "elapsed_ms": askmod.elapsed_ms(started)})
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
 
     @app.post("/api/index/rebuild", dependencies=[Depends(auth)])
     def rebuild_index():
@@ -494,8 +577,16 @@ def create_app(cfg: Config | None = None, orchestrator: Orchestrator | None = No
         return {"deleted": True, "card_id": card_id}
 
     @app.get("/api/enrich/logs", dependencies=[Depends(auth)])
-    def enrich_logs_route(limit: int = 50):
-        return {"logs": curation.enrich_logs(guard, limit=limit)}
+    def enrich_logs_route(limit: int = 50, page: int | None = None, page_size: int = 5):
+        # v0.60 分页：带 page 参数 → 服务端分页 {logs, total, page, page_size}；
+        # 不带 page → 旧口径 {logs}（最近 limit 条，总览活动块 limit=5 沿用）。
+        if page is None:
+            return {"logs": curation.enrich_logs(guard, limit=limit)}
+        if page < 1 or page_size < 1 or page_size > 200:
+            raise HTTPException(status_code=400, detail="page must be >= 1 and 1 <= page_size <= 200")
+        data = curation.enrich_logs_page(guard, page=page, page_size=page_size)
+        data.update({"page": page, "page_size": page_size})
+        return data
 
     @app.get("/api/parsers", dependencies=[Depends(auth)])
     def parsers():

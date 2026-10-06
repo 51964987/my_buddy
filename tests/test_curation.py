@@ -250,3 +250,31 @@ def test_enrich_logs_aggregation(cfg, guard):
     assert logs[0]["title"] == "t-seed0002"
     assert logs[0]["outcome"] == "enriched"
     assert logs[0]["rel"] == "sources/web/2026/seed0002/note.md"
+
+
+def test_enrich_logs_pagination(cfg, guard):
+    """v0.60 分页：total 为全量计数，页切片按时间倒序；越界页返回空列表。"""
+    _seed_note(guard, "seed0001")
+    _seed_note(guard, "seed0002")
+    _seed_note(guard, "seed0003")
+    for i, entry_id in enumerate(("seed0001", "seed0002", "seed0003"), start=1):
+        rel = f"sources/web/2026/{entry_id}/meta.json"
+        meta = json.loads(guard.kb_root.joinpath(*rel.split("/")).read_text("utf-8"))
+        meta["enrich"]["log"] = [{"at": f"2026-10-03T10:0{i}:00+08:00", "outcome": "enriched", "attempts": 1}]
+        guard.write_json("enrich", rel, meta)
+
+    page1 = curation.enrich_logs_page(guard, page=1, page_size=2)
+    assert page1["total"] == 3
+    assert [e["entry_id"] for e in page1["logs"]] == ["seed0003", "seed0002"]  # 时间倒序
+
+    page2 = curation.enrich_logs_page(guard, page=2, page_size=2)
+    assert page2["total"] == 3
+    assert [e["entry_id"] for e in page2["logs"]] == ["seed0001"]
+
+    # 越界页：切片为空、total 不变（前端据此回退末页）
+    page9 = curation.enrich_logs_page(guard, page=9, page_size=2)
+    assert page9["logs"] == []
+    assert page9["total"] == 3
+
+    # 旧口径 enrich_logs（总览活动块 limit=5）不受影响
+    assert [e["entry_id"] for e in curation.enrich_logs(guard, limit=2)] == ["seed0003", "seed0002"]

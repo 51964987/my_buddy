@@ -205,8 +205,8 @@ def regenerate_card(guard: Guard, card_id: str) -> dict:
     return {"deleted": card_id, "reset_sources": reset}
 
 
-def enrich_logs(guard: Guard, limit: int = ENRICH_LOG_LIMIT) -> list[dict]:
-    """enrich 操作流水聚合（§4.4 v0.17）：扫 sources/collections 的 meta.json enrich.log。"""
+def _collect_enrich_logs(guard: Guard) -> list[dict]:
+    """enrich 流水全量聚合（时间倒序）：扫 sources/collections 的 meta.json enrich.log。"""
     out = []
     for note_rel, note_fm in _iter_notes(guard):
         meta = _read_meta(guard, note_rel)
@@ -225,7 +225,19 @@ def enrich_logs(guard: Guard, limit: int = ENRICH_LOG_LIMIT) -> list[dict]:
                 }
             )
     out.sort(key=lambda e: e.get("at") or "", reverse=True)
-    return out[: max(1, int(limit))]
+    return out
+
+
+def enrich_logs(guard: Guard, limit: int = ENRICH_LOG_LIMIT) -> list[dict]:
+    """enrich 操作流水聚合（§4.4 v0.17）：最近 limit 条（总览活动块等旧调用方）。"""
+    return _collect_enrich_logs(guard)[: max(1, int(limit))]
+
+
+def enrich_logs_page(guard: Guard, page: int, page_size: int) -> dict:
+    """enrich 流水分页（v0.60）：服务端分页返回 {logs, total}，total 供前端页码条。"""
+    all_logs = _collect_enrich_logs(guard)
+    start = (max(1, int(page)) - 1) * int(page_size)
+    return {"logs": all_logs[start : start + int(page_size)], "total": len(all_logs)}
 
 
 # ---------------- 内部工具 ----------------

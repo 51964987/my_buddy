@@ -6,7 +6,7 @@
  * 组级「整条晋升 / 整条打回」+ 跨组勾选批量处置（POST /api/wiki/batch 逐条收口）。
  * 卡详情口径不变（v0.35）：AI 元信息 + 源条目 AI 摘要与标签（摘要卡按 sources 联查）+ 渲染正文 + 原文入口。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { api, type WikiCard } from '../api'
 import { renderMarkdown } from '../markdown'
 
@@ -14,6 +14,9 @@ const emit = defineEmits<{ (e: 'refresh-badge'): void }>()
 
 const cards = ref<WikiCard[]>([])
 const logs = ref<Record<string, unknown>[]>([])
+const logPage = ref(1) // v0.60 分页：默认每页 5 条（业界分页器口径，参考 AntD/Element）
+const logPageSize = ref(5)
+const logTotal = ref(0)
 const error = ref('')
 const notice = ref('')
 const busy = ref('')
@@ -51,7 +54,51 @@ const orphans = computed(() => {
 
 const relatedTotal = computed(() => groups.value.reduce((n, g) => n + g.related.length, 0))
 
-const allChecked = computed(() => groups.value.length > 0 && groups.value.every((g) => checked.value.has(g.key)))
+// v0.64 分页（与 v0.60 日志分页同口径）：默认每页 5 个审核单元，客户端切页——
+// /api/wiki 全量返回且本地库规模小，暂不需服务端分页（业界：本地工具列表客户端切页即可）
+const unitPage = ref(1)
+const unitPageSize = ref(5)
+const unitTotal = computed(() => groups.value.length)
+const unitPageCount = computed(() => Math.max(1, Math.ceil(unitTotal.value / unitPageSize.value)))
+
+// 数据收缩（删除/晋升后）当前页越界：回退到最后一页（业界分页器口径）
+watch(unitTotal, () => {
+  if (unitPage.value > unitPageCount.value) unitPage.value = unitPageCount.value
+})
+
+const pagedGroups = computed(() =>
+  groups.value.slice((unitPage.value - 1) * unitPageSize.value, unitPage.value * unitPageSize.value),
+)
+
+function gotoUnitPage(n: number) {
+  if (n >= 1 && n <= unitPageCount.value && n !== unitPage.value) unitPage.value = n
+}
+
+function changeUnitPageSize() {
+  unitPage.value = 1
+}
+
+/** 页码条（与 v0.60 日志分页同口径：首页/末页/当前页±1，间隔以省略号折叠） */
+const unitPageItems = computed<(number | '…')[]>(() => {
+  const cur = unitPage.value
+  const last = unitPageCount.value
+  const pages = [...new Set([1, last, cur - 1, cur, cur + 1])]
+    .filter((n) => n >= 1 && n <= last)
+    .sort((a, b) => a - b)
+  const out: (number | '…')[] = []
+  let prev = 0
+  for (const n of pages) {
+    if (n - prev > 1) out.push('…')
+    out.push(n)
+    prev = n
+  }
+  return out
+})
+
+// 全选/全不选按当前页（业界口径：分页下 select-all 只作用于可见行，AntD/Gmail 同款）
+const allChecked = computed(
+  () => pagedGroups.value.length > 0 && pagedGroups.value.every((g) => checked.value.has(g.key)),
+)
 
 function toggleGroup(key: string) {
   const next = new Set(checked.value)
@@ -61,7 +108,7 @@ function toggleGroup(key: string) {
 }
 
 function toggleAll() {
-  checked.value = allChecked.value ? new Set() : new Set(groups.value.map((g) => g.key))
+  checked.value = allChecked.value ? new Set() : new Set(pagedGroups.value.map((g) => g.key))
 }
 
 function toggleGroupOpen(key: string) {
@@ -85,7 +132,7 @@ type Row =
 
 const rows = computed<Row[]>(() => {
   const out: Row[] = []
-  for (const g of groups.value) {
+  for (const g of pagedGroups.value) {
     out.push({ kind: 'card', card: g.summary, group: g, role: 'summary' })
     if (g.related.length) out.push({ kind: 'toggle', group: g })
     if (openedGroup.value === g.key) {
@@ -160,18 +207,66 @@ const detail = ref<Record<string, Detail>>({})
 const editingId = ref('')
 const editBody = ref('')
 
-async function load() {
+async function loadLogs() {
   try {
-    const [c, l] = await Promise.all([
-      api.get<{ cards: WikiCard[] }>('/api/wiki'),
-      api.get<{ logs: Record<string, unknown>[] }>('/api/enrich/logs?limit=50'),
-    ])
-    cards.value = c.cards
+    const l = await api.get<{ logs: Record<string, unknown>[]; total: number }>(
+      `/api/enrich/logs?page=${logPage.value}&page_size=${logPageSize.value}`,
+    )
+    // 数据收缩后当前页可能越界：按业界分页器口径回退到最后一页再取一次
+    const last = Math.max(1, Math.ceil(l.total / logPageSize.value))
+    if (l.total > 0 && logPage.value > last) {
+      logPage.value = last
+      return loadLogs()
+    }
     logs.value = l.logs
+    logTotal.value = l.total
     error.value = ''
   } catch (e) {
     error.value = String(e instanceof Error ? e.message : e)
   }
+}
+
+async function load() {
+  try {
+    const [c] = await Promise.all([
+      api.get<{ cards: WikiCard[] }>('/api/wiki'),
+      loadLogs(),
+    ])
+    cards.value = c.cards
+    error.value = ''
+  } catch (e) {
+    error.value = String(e instanceof Error ? e.message : e)
+  }
+}
+
+const logPageCount = computed(() => Math.max(1, Math.ceil(logTotal.value / logPageSize.value)))
+
+/** 页码条（业界口径：首页/末页/当前页±1，间隔以省略号折叠） */
+const logPageItems = computed<(number | '…')[]>(() => {
+  const cur = logPage.value
+  const last = logPageCount.value
+  const pages = [...new Set([1, last, cur - 1, cur, cur + 1])]
+    .filter((n) => n >= 1 && n <= last)
+    .sort((a, b) => a - b)
+  const out: (number | '…')[] = []
+  let prev = 0
+  for (const n of pages) {
+    if (n - prev > 1) out.push('…')
+    out.push(n)
+    prev = n
+  }
+  return out
+})
+
+function gotoLogPage(n: number) {
+  if (n < 1 || n > logPageCount.value || n === logPage.value) return
+  logPage.value = n
+  loadLogs()
+}
+
+function changeLogPageSize() {
+  logPage.value = 1
+  loadLogs()
 }
 
 async function act(card: WikiCard, action: 'promote' | 'regenerate' | 'delete') {
@@ -276,6 +371,7 @@ onMounted(load)
     <p class="muted" style="margin-top: -4px">
       按条目聚合（v0.55）：每行是一次 AI 整理（审核单元 = 源条目），实体/概念卡折叠在组内明细；
       点标题展开 AI 摘要/标签、渲染正文与原文入口，单卡处置在详情里，组级可整条晋升/打回，勾选多行批量操作。
+      分页展示（v0.64）：默认每页 5 个审核单元，全选仅作用于当前页。
     </p>
     <p v-if="!groups.length" class="muted">暂无卡片。开启 AI 整理（ai.enabled）后由 enrich 流水线产出。</p>
     <template v-else>
@@ -289,7 +385,7 @@ onMounted(load)
       <table class="list">
         <thead>
           <tr>
-            <th style="width: 32px"><input type="checkbox" :checked="allChecked" title="全选/全不选" @change="toggleAll" /></th>
+            <th style="width: 32px"><input type="checkbox" :checked="allChecked" title="全选本页" @change="toggleAll" /></th>
             <th>条目（摘要卡）</th><th>状态</th><th>置信度</th><th>生成信息</th><th style="width: 240px">处置</th>
           </tr>
         </thead>
@@ -414,6 +510,27 @@ onMounted(load)
         </tbody>
       </table>
       </div>
+      <!-- v0.64 分页条（与 v0.60 日志分页同款样式与口径） -->
+      <div class="pager" style="margin-top: 8px">
+        <span class="muted">
+          第 {{ (unitPage - 1) * unitPageSize + 1 }}–{{ Math.min(unitPage * unitPageSize, unitTotal) }} 条 /
+          共 {{ unitTotal }} 个审核单元
+        </span>
+        <label class="muted">每页
+          <select v-model.number="unitPageSize" @change="changeUnitPageSize">
+            <option :value="5">5</option>
+            <option :value="10">10</option>
+            <option :value="20">20</option>
+            <option :value="50">50</option>
+          </select>
+        </label>
+        <button :disabled="unitPage <= 1" @click="gotoUnitPage(unitPage - 1)">‹ 上一页</button>
+        <template v-for="(item, i) in unitPageItems" :key="i">
+          <span v-if="item === '…'" class="muted">…</span>
+          <button v-else class="pager-page" :class="{ active: item === unitPage }" @click="gotoUnitPage(item)">{{ item }}</button>
+        </template>
+        <button :disabled="unitPage >= unitPageCount" @click="gotoUnitPage(unitPage + 1)">下一页 ›</button>
+      </div>
       <div v-if="orphans.length" style="margin-top: 12px">
         <h3>无主明细卡（{{ orphans.length }} 张，首次来源条目已无摘要卡）</h3>
         <p class="muted" style="font-size: 12px">正常流程不产生；可直接晋升或删除。</p>
@@ -427,9 +544,10 @@ onMounted(load)
   </div>
 
   <div class="panel">
-    <h2>enrich 操作日志（meta.json enrich.log 聚合，最近 50 条）</h2>
+    <h2>enrich 操作日志（meta.json enrich.log 聚合，共 {{ logTotal }} 条）</h2>
     <p v-if="!logs.length" class="muted">暂无流水。enrich 每次尝试（成功/重试/失败/复活）都会记录。</p>
-    <div v-else class="table-scroll">
+    <template v-else>
+    <div class="table-scroll">
     <table class="list">
       <thead><tr><th>时间</th><th>结果</th><th>条目</th><th>说明</th><th>尝试</th></tr></thead>
       <tbody>
@@ -447,5 +565,23 @@ onMounted(load)
       </tbody>
     </table>
     </div>
+    <div class="pager" style="margin-top: 8px">
+      <span class="muted">第 {{ (logPage - 1) * logPageSize + 1 }}–{{ Math.min(logPage * logPageSize, logTotal) }} 条</span>
+      <label class="muted">每页
+        <select v-model.number="logPageSize" @change="changeLogPageSize">
+          <option :value="5">5</option>
+          <option :value="10">10</option>
+          <option :value="20">20</option>
+          <option :value="50">50</option>
+        </select>
+      </label>
+      <button :disabled="logPage <= 1" @click="gotoLogPage(logPage - 1)">‹ 上一页</button>
+      <template v-for="(item, i) in logPageItems" :key="i">
+        <span v-if="item === '…'" class="muted">…</span>
+        <button v-else class="pager-page" :class="{ active: item === logPage }" @click="gotoLogPage(item)">{{ item }}</button>
+      </template>
+      <button :disabled="logPage >= logPageCount" @click="gotoLogPage(logPage + 1)">下一页 ›</button>
+    </div>
+    </template>
   </div>
 </template>

@@ -300,6 +300,29 @@ def test_search_and_index_rebuild_api(cfg, guard):
             assert resp.json()["total"] == 0
 
 
+def test_index_status_reports_vector_progress(cfg, guard):
+    """v0.62 可观测口径：/api/index/status 的 vector 分区必须带嵌入进度投影。"""
+    from .test_indexer import make_note
+
+    make_note(guard, "sources/a/note.md", title="向量进度", body="正文。", status="normalized")
+    # 默认关：phase=disabled（vector_enabled 在 Indexer 构造时读取，v0.17 既有口径）
+    with TestClient(create_app(cfg)) as client:
+        vec = client.get("/api/index/status").json()["vector"]
+        assert vec["enabled"] is False
+        assert vec["progress"]["phase"] == "disabled"
+
+    # 开启但 embedding 任务未配置：懒同步后显式 error（不裸穿），进度 phase 同步标注
+    cfg.data["index"]["vector_enabled"] = True
+    cfg.data["ai"]["tasks"]["embedding"] = {"provider": "nonexistent"}
+    with TestClient(create_app(cfg)) as client:
+        resp = client.get("/api/search", params={"q": "向量"})
+        assert resp.status_code == 200
+        vec = client.get("/api/index/status").json()["vector"]
+        assert vec["state"] == "error"
+        assert vec["progress"]["phase"] == "error"
+        assert set(vec["progress"]) == {"phase", "batch_done", "batch_total", "embedded", "pending"}
+
+
 def test_enrich_run_and_rerun_api(cfg, guard):
     from kbserver.enrich import Enricher
     from kbserver.orchestrator import Orchestrator
@@ -418,6 +441,17 @@ def test_enrich_logs_and_facets_and_parsers_api(cfg, guard):
         logs = client.get("/api/enrich/logs").json()["logs"]
         assert len(logs) == 1
         assert logs[0]["entry_id"] == "seed0001"
+
+        # v0.60 分页口径：带 page → {logs, total, page, page_size}
+        paged = client.get("/api/enrich/logs?page=1&page_size=5").json()
+        assert paged["total"] == 1
+        assert paged["page"] == 1
+        assert paged["page_size"] == 5
+        assert len(paged["logs"]) == 1
+        # 非法参数 → 400
+        assert client.get("/api/enrich/logs?page=0").status_code == 400
+        assert client.get("/api/enrich/logs?page=1&page_size=0").status_code == 400
+        assert client.get("/api/enrich/logs?page=1&page_size=999").status_code == 400
 
         facets = client.get("/api/facets").json()
         assert "web" in facets["platforms"]  # 注册表值

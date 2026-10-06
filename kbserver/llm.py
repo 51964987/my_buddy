@@ -7,6 +7,7 @@ api_key 严格 env-only：只按 provider 条目记录的环境变量名在运�
 
 from __future__ import annotations
 
+import json
 import os
 
 import httpx
@@ -91,6 +92,75 @@ class ChatClient:
             return pick(resp.json())
         except (ValueError, KeyError, IndexError) as exc:
             raise LLMError(f"unexpected response shape: {type(exc).__name__}") from exc
+
+
+    def chat_stream(self, messages: list[dict], temperature: float = 0.2):
+        """流式 chat：逐段 yield 文本增量（同步生成器，异步侧由调用方桥接）。
+
+        协议分支与 chat() 同源：
+        - openai 兼容：SSE `data: {...}` 行取 choices[0].delta.content，`[DONE]` 结束；
+        - ollama 原生：NDJSON 逐行 JSON 取 message.content，`done: true` 结束（think:false 保持）。
+        非零状态码抛 LLMError（流模式下先 read() 取响应体再判错）；坏行跳过不中断流。
+        """
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.api == "ollama":
+            base = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
+            path, payload = "/api/chat", {
+                "model": self.model,
+                "messages": messages,
+                "stream": True,
+                "think": False,
+                "options": {"temperature": temperature},
+            }
+        else:
+            base = self.base_url
+            path, payload = "/chat/completions", {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "stream": True,
+            }
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                with client.stream("POST", f"{base}{path}", headers=headers, json=payload) as resp:
+                    if resp.status_code >= 400:
+                        # 只暴露状态码与截断的响应体，绝不回显请求头（含 key）
+                        body = resp.read().decode("utf-8", errors="replace")
+                        raise LLMError(f"HTTP {resp.status_code}: {body[:200]}")
+                    for line in resp.iter_lines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if self.api == "ollama":
+                            # NDJSON：每行一个 JSON 对象
+                            try:
+                                data = json.loads(line)
+                            except ValueError:
+                                continue
+                            if data.get("done"):
+                                break
+                            delta = (data.get("message") or {}).get("content")
+                            if delta:
+                                yield delta
+                        else:
+                            # SSE：`data: {...}` / `data: [DONE]`
+                            if not line.startswith("data:"):
+                                continue
+                            data_str = line[len("data:"):].strip()
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                data = json.loads(data_str)
+                            except ValueError:
+                                continue
+                            choices = data.get("choices") or []
+                            delta = ((choices[0].get("delta") or {}).get("content")) if choices else None
+                            if delta:
+                                yield delta
+        except httpx.HTTPError as exc:
+            raise LLMError(f"request failed: {type(exc).__name__}") from exc
 
 
 class EmbedClient:

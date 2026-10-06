@@ -45,9 +45,13 @@ if errorlevel 1 (
 popd
 
 :afterbuild
+REM ---------------- interpreter: fixed venv312 (Python 3.12, tech-stack baseline) ----------------
+REM 绝对路径固定解释器，避免 PATH 上的 python 漂移到其他环境（v0.36 曾因解释器漂移缺依赖 500）
+set "PY=D:\venvs\312\Scripts\python.exe"
+
 REM ---------------- read port from config (fallback 8765) ----------------
 set "PORT=8765"
-for /f %%i in ('python -X utf8 -c "import json,os;print(json.load(open('kbserver.config.json', encoding='utf-8')).get('port', 8765)) if os.path.exists('kbserver.config.json') else print(8765)"') do set "PORT=%%i"
+for /f %%i in ('"%PY%" -X utf8 -c "import json,os;print(json.load(open('kbserver.config.json', encoding='utf-8')).get('port', 8765)) if os.path.exists('kbserver.config.json') else print(8765)"') do set "PORT=%%i"
 
 echo ============================================
 echo   kb buddy 服务
@@ -72,7 +76,7 @@ echo 端口 %PORT% 无旧服务占用
 
 :afterkill
 echo 启动服务...
-python -X utf8 -m kbserver
+"%PY%" -X utf8 -m kbserver
 echo.
 echo 服务已退出
 pause

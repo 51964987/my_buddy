@@ -197,7 +197,13 @@ export interface StatusInfo {
   version: string
   index: {
     docs: number
-    vector: { enabled: boolean; state: string; embedded: number; error: string | null }
+    vector: {
+      enabled: boolean
+      state: string
+      embedded: number
+      error: string | null
+      progress?: { phase: string; batch_done: number; batch_total: number; embedded: number; pending: number }
+    }
   }
 }
 

@@ -34,8 +34,11 @@ def make_wiki_card(guard, rel: str, *, card_id: str, title: str, body: str):
     guard.write_text("enrich", rel, text)
 
 
-def make_entity_card(guard, name: str, *, status: str = "promoted", relations=None):
-    """按 enrich 产物形态写实体卡（§4.5 v0.40），返回卡 id。"""
+def make_entity_card(guard, name: str, *, status: str = "promoted", relations=None, sources=None):
+    """按 enrich 产物形态写实体卡（§4.5 v0.40），返回卡 id。
+
+    sources 可注入（v0.68 共现边用例需要可控的来源条目交集）。
+    """
     from kbserver.enrich import entity_card_id
 
     cid = entity_card_id(name)
@@ -48,7 +51,7 @@ def make_entity_card(guard, name: str, *, status: str = "promoted", relations=No
         "aliases": [],
         "entity_type": "技术",
         "relations": relations or [],
-        "sources": ["seed1"],
+        "sources": sources or ["seed1"],
         "created_at": "2026-10-05T10:00:00+08:00",
         "model": "fake-model",
     }
@@ -56,6 +59,34 @@ def make_entity_card(guard, name: str, *, status: str = "promoted", relations=No
         "enrich",
         f"wiki/{cid}.md",
         "---\n" + yaml.safe_dump(fm, allow_unicode=True, sort_keys=False) + "---\n\n" + f"# {name}\n",
+    )
+    return cid
+
+
+def make_concept_card(guard, title: str, *, status: str = "promoted", sources=None, heading=None):
+    """按 aggregate 产物形态写概念卡（§5.1 ② v0.56），返回卡 id。
+
+    概念卡 frontmatter **无 title**（schema 未存），名称只在正文首行——v0.68 图谱
+    据此解析；heading 可注入以覆盖"无标题/正文直接开头"的边界。
+    """
+    from kbserver.enrich import concept_card_id
+
+    cid = concept_card_id(title)
+    fm = {
+        "id": cid,
+        "type": "concept",
+        "ai_generated": True,
+        "status": status,
+        "sources": sources or ["seed1"],
+        "created_at": "2026-10-05T10:00:00+08:00",
+        "model": "fake-model",
+        "confidence": 0.8,
+    }
+    head = f"# {title}\n" if heading is None else heading
+    guard.write_text(
+        "aggregate",
+        f"wiki/{cid}.md",
+        "---\n" + yaml.safe_dump(fm, allow_unicode=True, sort_keys=False) + "---\n\n" + head,
     )
     return cid
 
